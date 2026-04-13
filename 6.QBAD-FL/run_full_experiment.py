@@ -126,11 +126,8 @@ def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev):
     feature[:, 1] = FC["fc.weight"](w3.view(nc, -1)).cpu().detach().numpy().reshape(nc,)
 
     if np.isnan(feature).any():
-        col_mean = np.nanmean(feature, axis=0)
-        col_mean = np.nan_to_num(col_mean, nan=0.0)
-        for j in range(feature.shape[1]):
-            mask = np.isnan(feature[:, j])
-            feature[mask, j] = col_mean[j]
+        col_mean = np.nan_to_num(np.nanmean(feature, axis=0), nan=0.0)
+        feature = np.where(np.isnan(feature), col_mean, feature)
 
     honest_std = np.array([Std["conv1.weight"].item(), Std["fc.weight"].item()])
     honest_L2 = np.sqrt(np.sum(honest_std * honest_std.T)) + 1e-9

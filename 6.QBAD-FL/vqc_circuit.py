@@ -141,7 +141,7 @@ class VQCCircuit:
         if params is None:
             params = self._params
 
-        inputs_arr = np.nan_to_num(np.asarray(inputs, dtype=np.float32), nan=0.0, posinf=np.pi, neginf=0.0)
+        inputs_arr = np.nan_to_num(np.asarray(inputs, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
         inputs_t = torch.tensor(inputs_arr, dtype=torch.float32)
         weights_t = torch.tensor(params, dtype=torch.float32)
 
