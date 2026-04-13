@@ -166,7 +166,9 @@ class QuantumByzantineDetector(nn.Module):
 
     def _encode_features(self, x: torch.Tensor) -> torch.Tensor:
         """Compress *(batch, dimen)* to *(batch, num_qubits)* angles in [0, π]."""
-        batch_size = x.size(0)
+        # Replace NaN/inf before encoding
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
         dimen = x.size(1)
 
         chunk_size = max(1, dimen // self.num_qubits)
@@ -178,6 +180,10 @@ class QuantumByzantineDetector(nn.Module):
             chunks.append(x[:, start:end].mean(dim=1, keepdim=True))
 
         features = torch.cat(chunks, dim=1)  # (batch, num_qubits)
+
+        # Replace any NaN from empty chunks, then clamp to valid range
+        features = torch.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+        features = torch.clamp(features, -1.0, 1.0)
 
         # Per-sample min-max normalisation to [0, π]
         f_min = features.min(dim=1, keepdim=True)[0]
@@ -208,6 +214,7 @@ class QuantumByzantineDetector(nn.Module):
             outputs.append(out)
 
         outputs = torch.stack(outputs, dim=0)          # (batch,)
+        outputs = torch.nan_to_num(outputs, nan=0.5)   # replace NaN with neutral value
         outputs = ((1.0 + outputs) / 2.0).view(-1, 1)  # map [-1,1]→[0,1], reshape
 
         return outputs ** 2  # match LinearNet's x**2 output scaling

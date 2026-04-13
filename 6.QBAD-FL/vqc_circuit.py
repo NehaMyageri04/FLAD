@@ -101,12 +101,21 @@ class VQCCircuit:
         else:
             arr = np.array(weight_vector, dtype=np.float32).flatten()
 
+        # Replace NaN/inf before chunking
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+
         n = len(arr)
         features = np.zeros(self.num_qubits, dtype=np.float32)
         for i in range(self.num_qubits):
             start = i * (n // self.num_qubits)
             end = (i + 1) * (n // self.num_qubits) if i < self.num_qubits - 1 else n
             features[i] = arr[start:end].mean() if end > start else 0.0
+
+        # Replace any NaN that may have arisen from empty slices
+        features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Clamp to valid range before normalisation
+        features = np.clip(features, -1.0, 1.0)
 
         # Normalise to [0, π]
         f_min, f_max = features.min(), features.max()
@@ -132,11 +141,15 @@ class VQCCircuit:
         if params is None:
             params = self._params
 
-        inputs_t = torch.tensor(inputs, dtype=torch.float32)
+        inputs_arr = np.nan_to_num(np.asarray(inputs, dtype=np.float32), nan=0.0, posinf=np.pi, neginf=0.0)
+        inputs_t = torch.tensor(inputs_arr, dtype=torch.float32)
         weights_t = torch.tensor(params, dtype=torch.float32)
 
         exp_val = _vqc_qnode(inputs_t, weights_t)
-        return float((1.0 + exp_val) / 2.0)
+        result = float((1.0 + exp_val) / 2.0)
+        if np.isnan(result) or np.isinf(result):
+            result = 0.5
+        return result
 
     def get_parameters(self) -> np.ndarray:
         """Return a copy of the current variational parameters."""
