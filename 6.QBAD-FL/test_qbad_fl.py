@@ -132,6 +132,11 @@ def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev):
         FC["fc.weight"](w3.view(nc, -1)).cpu().detach().numpy().reshape(nc,)
     )
 
+    if np.isnan(feature).any():
+        print("  [Warning] NaN values detected in VQC features - replacing with column means")
+        col_mean = np.nan_to_num(np.nanmean(feature, axis=0), nan=0.0)
+        feature = np.where(np.isnan(feature), col_mean, feature)
+
     honest_std = np.array([Std["conv1.weight"].item(), Std["fc.weight"].item()])
     honest_L2 = np.sqrt(np.sum(honest_std * honest_std.T)) + 1e-9
 
