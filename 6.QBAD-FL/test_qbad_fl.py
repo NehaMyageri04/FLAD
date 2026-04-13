@@ -181,7 +181,7 @@ def fed_avg(Upload_Parameters, malicious):
 
 def collect_attack_updates(byzantine_clients, myClients, pattern, honest_all_weight,
                             num_clients, epoch, batchsize, net, loss_func, opti,
-                            global_parameters):
+                            global_parameters, data_name="mnist"):
     uploads = []
     for client in byzantine_clients:
         lp = {}
@@ -197,11 +197,11 @@ def collect_attack_updates(byzantine_clients, myClients, pattern, honest_all_wei
                 lp[key] = Attack.ZeroGradient_attack(honest_all_weight[key], byz)
         elif pattern == 3:
             pc = Attack.backdoor_poisoning_data(myClients.clients_set[client],
-                                                "mnist")
+                                                data_name)
             lp = pc.localTrain(epoch, batchsize, net, loss_func, opti, global_parameters)
         elif pattern == 4:
             pc = Attack.model_replacement_attack_data(myClients.clients_set[client],
-                                                      "mnist")
+                                                      data_name)
             lp = pc.localTrain(epoch, batchsize, net, loss_func, opti, global_parameters)
             for key in lp:
                 lp[key] = lp[key] * num_clients
@@ -282,7 +282,8 @@ def run_experiment(cfg, verbose=True):
 
         byz_uploads = collect_attack_updates(
             byzantine_clients, myClients, cfg["pattern"], honest_all_weight,
-            nc, cfg["epoch"], cfg["batchsize"], net, loss_func, opti, global_parameters
+            nc, cfg["epoch"], cfg["batchsize"], net, loss_func, opti, global_parameters,
+            data_name=cfg["data_name"]
         )
         Upload_Parameters.extend(byz_uploads)
 

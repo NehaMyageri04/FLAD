@@ -124,11 +124,11 @@ def _collect_byzantine_uploads(byzantine_clients, myClients, pattern, honest_all
             for k in honest_all_weight:
                 lp[k] = A.ZeroGradient_attack(honest_all_weight[k], byz)
         elif pattern == 3:
-            pc = A.backdoor_poisoning_data(myClients.clients_set[cl], "mnist")
+            pc = A.backdoor_poisoning_data(myClients.clients_set[cl], cfg["data_name"])
             lp = pc.localTrain(cfg["epoch"], cfg["batchsize"], net, loss_func, opti,
                                global_parameters)
         elif pattern == 4:
-            pc = A.model_replacement_attack_data(myClients.clients_set[cl], "mnist")
+            pc = A.model_replacement_attack_data(myClients.clients_set[cl], cfg["data_name"])
             lp = pc.localTrain(cfg["epoch"], cfg["batchsize"], net, loss_func, opti,
                                global_parameters)
             for k in lp:
