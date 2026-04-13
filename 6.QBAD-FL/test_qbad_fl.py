@@ -66,15 +66,22 @@ def train_vqc(weight_train, dimen, dev):
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     criterion = torch.nn.MSELoss(reduction="sum")
     label = torch.tensor([[1.0]])
-    for _ in range(20):
+    for epoch in range(20):
+        epoch_loss = 0.0
         for batch in loader:
             output = model(batch)
             loss = criterion(output, label)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            epoch_loss += loss.item()
+        if epoch % 5 == 4:
+            print("    VQC train epoch {}/20  loss={:.4f}".format(epoch + 1, epoch_loss))
     with torch.no_grad():
         all_output = model(weight_train)
+    print("    VQC outputs on clean data: min={:.4f}  max={:.4f}  mean={:.4f}".format(
+        all_output.min().item(), all_output.max().item(), all_output.mean().item()
+    ))
     std = all_output.mean(dim=0)
     dis = all_output.max() - all_output.min()
     return model, std, dis
@@ -105,6 +112,42 @@ def feature_extraction_model(Central_par, cfg, dev):
         FC["conv1.weight"], Std["conv1.weight"], Dis["conv1.weight"] = train_vqc(k1, 64 * 3 * 3 * 3, dev)
         FC["fc.weight"], Std["fc.weight"], Dis["fc.weight"] = train_vqc(w3, 10 * 512, dev)
     return FC, Std, Dis
+
+
+def _cosine_fallback_detect(feature, honest_std, nc, alpha=0.5):
+    """Fallback Byzantine detection using cosine similarity and L2 distance.
+
+    Used when DBSCAN cannot form valid clusters (e.g., all points are noise).
+    Scores each client by how closely their VQC output matches the honest
+    reference, then flags clients more than 1.5 std-devs below the median.
+
+    Parameters
+    ----------
+    feature     : (nc, 2) float array of VQC output scores.
+    honest_std  : (2,) float array — expected VQC output for honest clients.
+    nc          : total number of clients.
+    alpha       : cosine vs. L2 trade-off weight.
+
+    Returns
+    -------
+    list of int — indices of detected malicious clients.
+    """
+    honest_L2 = float(np.sqrt(np.sum(honest_std ** 2))) + 1e-9
+    scores = []
+    for c in range(nc):
+        f = feature[c]
+        f_L2 = float(np.sqrt(np.sum(f ** 2))) + 1e-9
+        cosin = float(np.sum(f * honest_std)) / (f_L2 * honest_L2)
+        length = abs(f_L2 / honest_L2 - 1.0)
+        scores.append(alpha * cosin - (1.0 - alpha) * length)
+    scores = np.array(scores)
+    threshold = float(np.median(scores)) - 1.5 * float(scores.std() + 1e-9)
+    malicious = [c for c in range(nc) if scores[c] < threshold]
+    print("  [Fallback] cosine scores: {}".format(
+        " ".join("{:.3f}".format(s) for s in scores)
+    ))
+    print("  [Fallback] threshold={:.4f}  detected={}".format(threshold, malicious))
+    return malicious
 
 
 def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev):
@@ -140,30 +183,61 @@ def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev):
     honest_std = np.array([Std["conv1.weight"].item(), Std["fc.weight"].item()])
     honest_L2 = np.sqrt(np.sum(honest_std * honest_std.T)) + 1e-9
 
-    eps1 = Dis["conv1.weight"].item()
-    eps3 = Dis["fc.weight"].item()
-    eps = (eps1 ** 2 + eps3 ** 2) ** 0.5
+    # Adaptive eps: use the VQC output range on clean data, but enforce a
+    # minimum so that DBSCAN can always form clusters even when the VQC has
+    # converged tightly around 1.0.
+    eps1 = max(abs(Dis["conv1.weight"].item()), 0.05)
+    eps3 = max(abs(Dis["fc.weight"].item()), 0.05)
+    eps = max((eps1 ** 2 + eps3 ** 2) ** 0.5, 0.1)
 
-    db = DBSCAN(eps=eps, min_samples=3).fit(feature)
-    label_list = db.labels_
+    print("  [Debug] VQC features (nc×2):\n    {}".format(
+        "\n    ".join(
+            "client{}: [{:.4f}, {:.4f}]".format(i, feature[i, 0], feature[i, 1])
+            for i in range(nc)
+        )
+    ))
+    print("  [Debug] honest_std={}, eps={:.4f}".format(honest_std, eps))
 
-    temp = np.zeros([1, 2])
-    label_mean, label_score = {}, {}
-    for lbl in set(db.labels_):
-        if lbl != -1:
-            for c in range(nc):
-                if label_list[c] == lbl:
-                    temp = np.concatenate((temp, feature[c, :].reshape(1, 2)), axis=0)
-            label_mean[lbl] = temp.mean(axis=0) * temp.shape[0] / (temp.shape[0] - 1)
-            cosin = cos(label_mean[lbl], honest_std)
+    # ── Primary detection: DBSCAN ─────────────────────────────────────────────
+    malicious = []
+    try:
+        db = DBSCAN(eps=eps, min_samples=2).fit(feature)
+        label_list = db.labels_
+        print("  [Debug] DBSCAN labels: {}".format(label_list.tolist()))
+
+        label_mean, label_score = {}, {}
+        for lbl in set(db.labels_):
+            if lbl == -1:
+                continue
+            # Collect points for this cluster (reset temp per label)
+            pts = np.array([feature[c] for c in range(nc) if label_list[c] == lbl])
+            if len(pts) == 0:
+                continue
+            lm = pts.mean(axis=0)
+            label_mean[lbl] = lm
+            cosin = cos(lm, honest_std)
             length = abs(
-                np.sqrt(np.sum(label_mean[lbl] * label_mean[lbl].T)) / honest_L2 - 1.0
+                np.sqrt(np.sum(lm * lm.T)) / honest_L2 - 1.0
             )
             label_score[lbl] = cfg["alpha"] * cosin - (1 - cfg["alpha"]) * length
 
-    label_score = sorted(label_score.items(), key=lambda x: x[1], reverse=True)
-    honest_label = label_score[0][0]
-    malicious = [c for c in range(nc) if label_list[c] != honest_label]
+        if label_score:
+            label_score_sorted = sorted(label_score.items(), key=lambda x: x[1], reverse=True)
+            honest_label = label_score_sorted[0][0]
+            print("  [Debug] honest_label={}, scores={}".format(
+                honest_label,
+                {k: "{:.4f}".format(v) for k, v in label_score.items()}
+            ))
+            malicious = [c for c in range(nc) if label_list[c] != honest_label]
+        else:
+            # All points are noise — fall back to cosine similarity
+            print("  [Warning] DBSCAN: no valid clusters (all noise), using fallback")
+            malicious = _cosine_fallback_detect(feature, honest_std, nc, cfg["alpha"])
+
+    except Exception as e:
+        print("  [Warning] DBSCAN failed ({}), using cosine fallback".format(e))
+        malicious = _cosine_fallback_detect(feature, honest_std, nc, cfg["alpha"])
+
     return malicious
 
 
