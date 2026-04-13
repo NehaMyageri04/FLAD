@@ -1,0 +1,47 @@
+# QBAD-FL Configuration
+# Quantum Byzantine Anomaly Detection in Federated Learning
+
+# ── VQC parameters ────────────────────────────────────────────────────────────
+vqc:
+  num_qubits: 4            # Number of qubits in the circuit
+  num_layers: 3            # Number of StronglyEntanglingLayers (variational depth)
+  encoding: angle          # Feature encoding method (angle embedding)
+  diff_method: parameter-shift  # Gradient computation for VQC parameters
+  learning_rate: 0.001     # Adam learning rate for VQC training
+  train_epochs: 20         # Number of epochs to train the detector per round
+
+# ── Quantum simulator ─────────────────────────────────────────────────────────
+quantum:
+  backend: default.qubit   # PennyLane device (CPU simulator)
+  # Uncomment to use Qiskit Aer backend:
+  # backend: qiskit.aer
+  # shots: 1024            # Number of shots (None = analytic, exact expectation)
+
+# ── Federated learning hyperparameters ───────────────────────────────────────
+federated:
+  num_of_clients: 50
+  byzantine_size: 10
+  num_comm: 20             # Communication rounds
+  local_epoch: 5
+  local_batch_size: 64
+  learning_rate: 0.1       # SGD lr for the main FL model
+  iid: true                # IID data distribution across clients
+  central_data_size: 300
+  central_data_pro: 0.1
+  alpha: 0.5               # Weight balancing cosine vs. length in cluster scoring
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+data:
+  name: mnist              # mnist | cifar_10
+  data_dir: ../data
+
+# ── Attack patterns ───────────────────────────────────────────────────────────
+# 0 = Gaussian,  1 = Sign-flip,  2 = Zero-gradient,
+# 3 = Backdoor,  4 = Model-replacement,  5 = MPAF,  6 = AGR-agnostic
+attack:
+  pattern: 5
+
+# ── Checkpointing ─────────────────────────────────────────────────────────────
+checkpoints:
+  save_path: ./checkpoints
+  val_freq: 1              # Validate every N communication rounds
