@@ -5,9 +5,11 @@ __pycache__/
 .Python
 checkpoints/*
 !checkpoints/.gitkeep
+
 results/*.csv
 results/*.json
 results/plots/*.png
 results/plots/*.pdf
 !results/.gitkeep
 !results/plots/.gitkeep
+
