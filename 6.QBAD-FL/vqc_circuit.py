@@ -107,11 +107,13 @@ class VQCCircuit:
         np.ndarray of shape (num_qubits,) with values in [0, π].
         """
         if isinstance(weight_vector, torch.Tensor):
-            arr = weight_vector.detach().cpu().numpy().flatten()
+            arr = weight_vector.detach().cpu().numpy().flatten().astype(np.float64)
         else:
-            arr = np.array(weight_vector, dtype=np.float32).flatten()
+            arr = np.array(weight_vector, dtype=np.float64).flatten()
 
-        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float64)
+        # Replace NaN/inf before computing statistics; use float64 throughout
+        # to avoid overflow in skewness and norm for large Byzantine weights.
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
 
         d = len(arr)
         mean_val = arr.mean()
@@ -131,7 +133,14 @@ class VQCCircuit:
             np.tanh(np.log1p(norm_val)),                 # feature 5
         ], dtype=np.float32)
 
-        features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
+        features = np.nan_to_num(
+            features,
+            nan=0.0,
+            # tanh is bounded to (-1,1) so posinf/neginf can only arise from
+            # overflow in log1p or division on pathological inputs; clamp them.
+            posinf=1.0,
+            neginf=-1.0,
+        ).astype(np.float32)
 
         # Map from [-1, 1] to [0, π]
         features = (features + 1.0) / 2.0 * float(np.pi)

@@ -51,6 +51,14 @@ from metrics import (
 
 # ── Helpers (mirror 6.QBAD-FL/main.py without global args) ───────────────────
 
+# Minimum per-axis epsilon for DBSCAN: prevents eps→0 when VQC converges
+# tightly on clean data (which would make all points become noise).
+_DBSCAN_MIN_EPS = 0.05
+
+# Fallback cosine-similarity detector: flag clients whose score is more than
+# this many standard deviations below the median.
+_FALLBACK_THRESHOLD_STDEV = 1.5
+
 
 def cos(a, b):
     return np.sum(a * b.T) / (
@@ -141,7 +149,7 @@ def _cosine_fallback_detect(feature, honest_std, nc, alpha=0.5):
         length = abs(f_L2 / honest_L2 - 1.0)
         scores.append(alpha * cosin - (1.0 - alpha) * length)
     scores = np.array(scores)
-    threshold = float(np.median(scores)) - 1.5 * float(scores.std() + 1e-9)
+    threshold = float(np.median(scores)) - _FALLBACK_THRESHOLD_STDEV * float(scores.std() + 1e-9)
     malicious = [c for c in range(nc) if scores[c] < threshold]
     print("  [Fallback] cosine scores: {}".format(
         " ".join("{:.3f}".format(s) for s in scores)
@@ -186,8 +194,8 @@ def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev):
     # Adaptive eps: use the VQC output range on clean data, but enforce a
     # minimum so that DBSCAN can always form clusters even when the VQC has
     # converged tightly around 1.0.
-    eps1 = max(abs(Dis["conv1.weight"].item()), 0.05)
-    eps3 = max(abs(Dis["fc.weight"].item()), 0.05)
+    eps1 = max(abs(Dis["conv1.weight"].item()), _DBSCAN_MIN_EPS)
+    eps3 = max(abs(Dis["fc.weight"].item()), _DBSCAN_MIN_EPS)
     eps = max((eps1 ** 2 + eps3 ** 2) ** 0.5, 0.1)
 
     print("  [Debug] VQC features (nc×2):\n    {}".format(

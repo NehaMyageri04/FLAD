@@ -56,6 +56,10 @@ from metrics import (
 
 # ── Internal FL helpers ───────────────────────────────────────────────────────
 
+# Minimum per-axis epsilon for DBSCAN: prevents eps→0 when VQC converges
+# tightly on clean data (which would make all points become noise).
+_DBSCAN_MIN_EPS = 0.05
+
 
 def _cos(a, b):
     return np.sum(a * b.T) / (
@@ -152,8 +156,8 @@ def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev):
     honest_L2 = np.sqrt(np.sum(honest_std * honest_std.T)) + 1e-9
 
     # Adaptive eps with minimum threshold to prevent DBSCAN from finding no clusters
-    eps1 = max(abs(Dis["conv1.weight"].item()), 0.05)
-    eps3 = max(abs(Dis["fc.weight"].item()), 0.05)
+    eps1 = max(abs(Dis["conv1.weight"].item()), _DBSCAN_MIN_EPS)
+    eps3 = max(abs(Dis["fc.weight"].item()), _DBSCAN_MIN_EPS)
     eps = max((eps1 ** 2 + eps3 ** 2) ** 0.5, 0.1)
 
     try:
