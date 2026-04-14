@@ -62,9 +62,11 @@ _FALLBACK_THRESHOLD_STDEV = 1.5
 # Number of previous rounds of honest updates to retain for sign-flip detection.
 _HONEST_UPDATE_HISTORY_SIZE = 3
 
-# Dot-product threshold for sign-flip detection: updates with a dot product
-# below this value against the historical honest direction are flagged.
-_SIGN_FLIP_DOT_PRODUCT_THRESHOLD = -0.1
+# Cosine-similarity threshold for sign-flip detection: updates whose cosine
+# similarity with the historical honest direction falls below this value are
+# flagged as sign-flip attackers.  Using cosine similarity (rather than raw
+# dot product) makes the detector scale-invariant.
+_SIGN_FLIP_COSINE_THRESHOLD = -0.5
 
 
 def cos(a, b):
@@ -182,8 +184,8 @@ def detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc):
     -------
     list of int — indices of clients detected as sign-flip attackers.
     """
-    if len(honest_update_history) < 2:
-        return []  # Need at least 2 historical updates for a reliable reference
+    if not honest_update_history:
+        return []  # Need a non-empty update history for a reliable reference
 
     # Compute the average honest gradient direction over all stored rounds
     all_flats = [
@@ -191,18 +193,24 @@ def detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc):
         for h in honest_update_history
     ]
     avg_honest_flat = torch.stack(all_flats).mean(dim=0)
+    avg_honest_norm = torch.norm(avg_honest_flat).item() + 1e-9
 
     detected = []
     for c, client_update in enumerate(Upload_Parameters):
         client_flat = torch.cat([client_update[k].flatten()
                                  for k in sorted(client_update.keys())])
+        client_norm = torch.norm(client_flat).item() + 1e-9
         dot_prod = torch.dot(avg_honest_flat, client_flat).item()
-        # Clearly negative dot product → gradient direction is flipped
-        if dot_prod < _SIGN_FLIP_DOT_PRODUCT_THRESHOLD:
+        # Use cosine similarity (scale-invariant) to detect sign-flipped updates
+        cosine_sim = dot_prod / (avg_honest_norm * client_norm)
+        if cosine_sim < _SIGN_FLIP_COSINE_THRESHOLD:
             detected.append(c)
+            print("  [Sign-Flip Detection] Client {} cosine_sim={:.4f} → FLAGGED".format(
+                c, cosine_sim))
 
     if detected:
-        print("  [Sign-Flip Detection] Detected flip attacks at clients: {}".format(detected))
+        print("  [Sign-Flip Detection] Detected {} flip attacks: {}".format(
+            len(detected), detected))
     return detected
 
 
@@ -296,10 +304,16 @@ def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev,
         malicious = _cosine_fallback_detect(feature, honest_std, nc, cfg["alpha"])
 
     # ── Phase 2: Sign-flip detection (ensemble with VQC) ─────────────────────
-    if honest_update_history is not None:
+    vqc_detected = list(malicious)
+    flip_detected = []
+    if honest_update_history is not None and len(honest_update_history) >= 1:
         flip_detected = detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc)
-        if flip_detected:
-            malicious = list(set(malicious) | set(flip_detected))
+
+    # ── Ensemble: merge VQC + sign-flip results ───────────────────────────────
+    malicious = list(set(vqc_detected) | set(flip_detected))
+    if flip_detected:
+        print("  [Ensemble] Combined VQC={} + SignFlip={} → Final={}".format(
+            vqc_detected, flip_detected, malicious))
 
     return malicious
 
