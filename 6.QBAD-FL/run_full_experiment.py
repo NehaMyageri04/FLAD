@@ -56,6 +56,10 @@ from metrics import (
 
 # ── Internal FL helpers ───────────────────────────────────────────────────────
 
+# Minimum per-axis epsilon for DBSCAN: prevents eps→0 when VQC converges
+# tightly on clean data (which would make all points become noise).
+_DBSCAN_MIN_EPS = 0.05
+
 
 def _cos(a, b):
     return np.sum(a * b.T) / (
@@ -70,13 +74,17 @@ def _train_vqc(weight_train, dimen):
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     criterion = torch.nn.MSELoss(reduction="sum")
     label = torch.tensor([[1.0]])
-    for _ in range(20):
+    for epoch in range(20):
+        epoch_loss = 0.0
         for batch in loader:
             out = model(batch)
             loss = criterion(out, label)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            epoch_loss += loss.item()
+        if epoch % 5 == 4:
+            print("    VQC train epoch {}/20  loss={:.4f}".format(epoch + 1, epoch_loss))
     with torch.no_grad():
         all_out = model(weight_train)
     return model, all_out.mean(dim=0), all_out.max() - all_out.min()
@@ -107,6 +115,21 @@ def _feature_extraction_model(Central_par, data_name):
     return FC, Std, Dis
 
 
+def _cosine_fallback_detect(feature, honest_std, nc, alpha=0.5):
+    """Fallback Byzantine detection using cosine similarity and L2 distance."""
+    honest_L2 = float(np.sqrt(np.sum(honest_std ** 2))) + 1e-9
+    scores = []
+    for c in range(nc):
+        f = feature[c]
+        f_L2 = float(np.sqrt(np.sum(f ** 2))) + 1e-9
+        cosin = float(np.sum(f * honest_std)) / (f_L2 * honest_L2)
+        length = abs(f_L2 / honest_L2 - 1.0)
+        scores.append(alpha * cosin - (1.0 - alpha) * length)
+    scores = np.array(scores)
+    threshold = float(np.median(scores)) - 1.5 * float(scores.std() + 1e-9)
+    return [c for c in range(nc) if scores[c] < threshold]
+
+
 def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev):
     if data_name == "mnist":
         k1 = torch.zeros(nc, 10, 1, 5, 5).to(dev)
@@ -131,22 +154,34 @@ def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev):
 
     honest_std = np.array([Std["conv1.weight"].item(), Std["fc.weight"].item()])
     honest_L2 = np.sqrt(np.sum(honest_std * honest_std.T)) + 1e-9
-    eps = (Dis["conv1.weight"].item() ** 2 + Dis["fc.weight"].item() ** 2) ** 0.5
-    db = DBSCAN(eps=eps, min_samples=3).fit(feature)
-    label_list = db.labels_
-    temp = np.zeros([1, 2])
-    label_score = {}
-    for lbl in set(db.labels_):
-        if lbl != -1:
-            for c in range(nc):
-                if label_list[c] == lbl:
-                    temp = np.concatenate((temp, feature[c, :].reshape(1, 2)), axis=0)
-            lm = temp.mean(axis=0) * temp.shape[0] / (temp.shape[0] - 1)
+
+    # Adaptive eps with minimum threshold to prevent DBSCAN from finding no clusters
+    eps1 = max(abs(Dis["conv1.weight"].item()), _DBSCAN_MIN_EPS)
+    eps3 = max(abs(Dis["fc.weight"].item()), _DBSCAN_MIN_EPS)
+    eps = max((eps1 ** 2 + eps3 ** 2) ** 0.5, 0.1)
+
+    try:
+        db = DBSCAN(eps=eps, min_samples=2).fit(feature)
+        label_list = db.labels_
+        label_score = {}
+        for lbl in set(db.labels_):
+            if lbl == -1:
+                continue
+            pts = np.array([feature[c] for c in range(nc) if label_list[c] == lbl])
+            if len(pts) == 0:
+                continue
+            lm = pts.mean(axis=0)
             cosin = _cos(lm, honest_std)
             length = abs(np.sqrt(np.sum(lm * lm.T)) / honest_L2 - 1.0)
             label_score[lbl] = alpha * cosin - (1 - alpha) * length
-    honest_label = sorted(label_score.items(), key=lambda x: x[1], reverse=True)[0][0]
-    return [c for c in range(nc) if label_list[c] != honest_label]
+
+        if label_score:
+            honest_label = sorted(label_score.items(), key=lambda x: x[1], reverse=True)[0][0]
+            return [c for c in range(nc) if label_list[c] != honest_label]
+        else:
+            return _cosine_fallback_detect(feature, honest_std, nc, alpha)
+    except Exception:
+        return _cosine_fallback_detect(feature, honest_std, nc, alpha)
 
 
 def _fed_avg(params_list, malicious):

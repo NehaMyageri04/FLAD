@@ -1,13 +1,15 @@
 """
 vqc_circuit.py — Variational Quantum Circuit for QBAD-FL
 
-Implements a 4-qubit VQC using PennyLane that serves as a drop-in quantum
+Implements a 6-qubit VQC using PennyLane that serves as a drop-in quantum
 replacement for the classical LinearNet detector in FLAD.
 
 Architecture
 ------------
-- Encoding  : AngleEmbedding of 4 compressed gradient features onto 4 qubits
-- Ansatz    : 3 StronglyEntanglingLayers (RY + RZ rotations + CNOT entanglement)
+- Encoding  : AngleEmbedding of 6 statistical features onto 6 qubits
+              Features: tanh(mean), tanh(log-std), tanh(norm/sqrt(d)),
+                        tanh(log-max-abs), tanh(skewness/3), tanh(log-norm)
+- Ansatz    : 5 StronglyEntanglingLayers (RY + RZ rotations + CNOT entanglement)
 - Readout   : Expectation value <Z> on the final qubit → mapped to [0, 1]
 - Training  : Parameter-shift rule via PennyLane's PyTorch interface
 """
@@ -18,8 +20,8 @@ import torch
 import torch.nn as nn
 
 # ── Global circuit constants ──────────────────────────────────────────────────
-NUM_QUBITS = 4
-NUM_LAYERS = 3
+NUM_QUBITS = 6
+NUM_LAYERS = 5
 
 # Shared quantum device (CPU simulator, thread-safe at module level)
 _qml_device = qml.device("default.qubit", wires=NUM_QUBITS)
@@ -82,11 +84,19 @@ class VQCCircuit:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def encode_features(self, weight_vector) -> np.ndarray:
-        """Compress a high-dimensional gradient vector to ``num_qubits`` angles.
+        """Extract statistical features from a gradient vector for quantum encoding.
 
-        The vector is split into ``num_qubits`` equal-sized chunks; the mean of
-        each chunk becomes one angle.  Values are then min-max normalised to
-        [0, π] so they are valid rotation angles for :func:`qml.AngleEmbedding`.
+        Computes 6 scale-aware statistics from the weight vector and maps each
+        through tanh so the result lies in (-1, 1), then rescales to [0, π]
+        for use as AngleEmbedding rotation angles.
+
+        The 6 features are:
+          0 - tanh(mean)                  → captures sign/bias attacks
+          1 - tanh(log(1 + std))          → captures variance attacks (Gaussian, MPAF)
+          2 - tanh(norm / sqrt(d))        → captures scale attacks (MPAF)
+          3 - tanh(log(1 + max_abs))      → captures outlier magnitude
+          4 - tanh(skewness / 3)          → captures asymmetric distributions
+          5 - tanh(log(1 + norm))         → captures absolute scale (MPAF)
 
         Parameters
         ----------
@@ -97,32 +107,44 @@ class VQCCircuit:
         np.ndarray of shape (num_qubits,) with values in [0, π].
         """
         if isinstance(weight_vector, torch.Tensor):
-            arr = weight_vector.detach().cpu().numpy().flatten()
+            arr = weight_vector.detach().cpu().numpy().flatten().astype(np.float64)
         else:
-            arr = np.array(weight_vector, dtype=np.float32).flatten()
+            arr = np.array(weight_vector, dtype=np.float64).flatten()
 
-        # Replace NaN/inf before chunking
+        # Replace NaN/inf before computing statistics; use float64 throughout
+        # to avoid overflow in skewness and norm for large Byzantine weights.
         arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
 
-        n = len(arr)
-        features = np.zeros(self.num_qubits, dtype=np.float32)
-        for i in range(self.num_qubits):
-            start = i * (n // self.num_qubits)
-            end = (i + 1) * (n // self.num_qubits) if i < self.num_qubits - 1 else n
-            features[i] = arr[start:end].mean() if end > start else 0.0
+        d = len(arr)
+        mean_val = arr.mean()
+        std_val = float(arr.std()) + 1e-9
+        norm_val = float(np.linalg.norm(arr))
+        max_abs = float(np.abs(arr).max()) if d > 0 else 0.0
 
-        # Replace any NaN that may have arisen from empty slices
-        features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+        # Skewness: E[(x - mean)^3] / std^3
+        skewness = float(np.mean(((arr - mean_val) / std_val) ** 3))
 
-        # Clamp to valid range before normalisation
-        features = np.clip(features, -1.0, 1.0)
+        features = np.array([
+            np.tanh(mean_val),                           # feature 0
+            np.tanh(np.log1p(std_val)),                  # feature 1
+            np.tanh(norm_val / (d ** 0.5 + 1e-9)),      # feature 2
+            np.tanh(np.log1p(max_abs)),                  # feature 3
+            np.tanh(skewness / 3.0),                     # feature 4
+            np.tanh(np.log1p(norm_val)),                 # feature 5
+        ], dtype=np.float32)
 
-        # Normalise to [0, π]
-        f_min, f_max = features.min(), features.max()
-        if f_max - f_min > 1e-9:
-            features = (features - f_min) / (f_max - f_min) * np.pi
-        else:
-            features = np.zeros(self.num_qubits, dtype=np.float32)
+        features = np.nan_to_num(
+            features,
+            nan=0.0,
+            # tanh is bounded to (-1,1) so posinf/neginf can only arise from
+            # overflow in log1p or division on pathological inputs; clamp them.
+            posinf=1.0,
+            neginf=-1.0,
+        ).astype(np.float32)
+
+        # Map from [-1, 1] to [0, π]
+        features = (features + 1.0) / 2.0 * float(np.pi)
+        features = np.clip(features, 0.0, float(np.pi))
 
         return features
 

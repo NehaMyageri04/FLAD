@@ -121,19 +121,20 @@ class QuantumByzantineDetector(nn.Module):
 
     Architecture
     ------------
-    1. **Feature compression** : Splits the input into ``num_qubits`` equal
-       chunks and takes the mean of each chunk, yielding ``num_qubits`` values.
-    2. **Normalisation**        : Min-max scales values to [0, π] per sample.
-    3. **VQC forward pass**     : AngleEmbedding + StronglyEntanglingLayers.
-    4. **Readout**              : ⟨Z⟩ on the last qubit mapped from [-1,1] to
+    1. **Feature extraction** : Computes 6 statistical descriptors per sample
+       (mean, log-std, normalized-norm, log-max-abs, skewness, log-norm) and
+       maps each through tanh → values in (-1, 1).
+    2. **Normalisation**       : Rescales from (-1, 1) to [0, π] per feature.
+    3. **VQC forward pass**    : AngleEmbedding + StronglyEntanglingLayers.
+    4. **Readout**             : ⟨Z⟩ on the last qubit mapped from [-1,1] to
                                   [0,1] and then squared (matching the
                                   ``LinearNet`` output format of ``x**2``).
 
     Parameters
     ----------
     dimen      : int  Flattened dimension of the input weight vector.
-    num_qubits : int  Number of qubits (default 4).
-    num_layers : int  Number of variational layers (default 3).
+    num_qubits : int  Number of qubits (default 6).
+    num_layers : int  Number of variational layers (default 5).
     """
 
     def __init__(
@@ -165,30 +166,49 @@ class QuantumByzantineDetector(nn.Module):
     # ── Feature encoding ──────────────────────────────────────────────────────
 
     def _encode_features(self, x: torch.Tensor) -> torch.Tensor:
-        """Compress *(batch, dimen)* to *(batch, num_qubits)* angles in [0, π]."""
-        # Replace NaN/inf before encoding
+        """Extract statistical features from weight vectors, map to [0, π].
+
+        Computes 6 scale-aware statistics per sample and maps each through
+        tanh so the result lies in (-1, 1), then rescales to [0, π].
+
+        The 6 features are:
+          0 - tanh(mean)                  → captures sign/bias attacks
+          1 - tanh(log(1 + std))          → captures variance attacks
+          2 - tanh(norm / sqrt(d))        → captures scale attacks (MPAF)
+          3 - tanh(log(1 + max_abs))      → captures outlier magnitude
+          4 - tanh(skewness / 3)          → captures asymmetric distributions
+          5 - tanh(log(1 + norm))         → captures absolute scale (MPAF)
+        """
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
-        dimen = x.size(1)
+        d = x.size(1)
 
-        chunk_size = max(1, dimen // self.num_qubits)
-        chunks = []
-        for i in range(self.num_qubits):
-            start = i * chunk_size
-            end = (start + chunk_size) if i < self.num_qubits - 1 else dimen
-            end = min(end, dimen)
-            chunks.append(x[:, start:end].mean(dim=1, keepdim=True))
+        mean_val = x.mean(dim=1)                                   # (batch,)
+        std_val = x.std(dim=1).clamp(min=1e-9)                    # (batch,)
+        norm_val = torch.norm(x, dim=1) / (d ** 0.5 + 1e-9)      # (batch,) normalized
+        max_abs = x.abs().max(dim=1)[0]                            # (batch,)
 
-        features = torch.cat(chunks, dim=1)  # (batch, num_qubits)
+        # Skewness: E[(x - mean)^3 / std^3]
+        x_normalized = (x - mean_val.unsqueeze(1)) / std_val.unsqueeze(1)
+        skewness = x_normalized.pow(3).mean(dim=1)                 # (batch,)
 
-        # Replace any NaN from empty chunks, then clamp to valid range
-        features = torch.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
-        features = torch.clamp(features, -1.0, 1.0)
+        # Absolute log-norm (captures large-scale attacks like MPAF)
+        log_norm_abs = torch.log1p(torch.norm(x, dim=1))          # (batch,)
 
-        # Per-sample min-max normalisation to [0, π]
-        f_min = features.min(dim=1, keepdim=True)[0]
-        f_max = features.max(dim=1, keepdim=True)[0]
-        features = (features - f_min) / (f_max - f_min + 1e-9) * float(np.pi)
+        raw_features = torch.stack([
+            torch.tanh(mean_val),                    # feature 0
+            torch.tanh(torch.log1p(std_val)),        # feature 1
+            torch.tanh(norm_val),                    # feature 2
+            torch.tanh(torch.log1p(max_abs)),        # feature 3
+            torch.tanh(skewness / 3.0),              # feature 4
+            torch.tanh(log_norm_abs),                # feature 5
+        ], dim=1)  # (batch, 6)
+
+        features = torch.nan_to_num(raw_features, nan=0.0, posinf=1.0, neginf=-1.0)
+
+        # Map from [-1, 1] to [0, π]
+        features = (features + 1.0) / 2.0 * float(np.pi)
+        features = torch.clamp(features, 0.0, float(np.pi))
 
         return features
 
