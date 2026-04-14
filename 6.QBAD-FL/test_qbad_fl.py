@@ -59,6 +59,9 @@ _DBSCAN_MIN_EPS = 0.05
 # this many standard deviations below the median.
 _FALLBACK_THRESHOLD_STDEV = 1.5
 
+# Number of previous rounds of honest updates to retain for sign-flip detection.
+_HONEST_UPDATE_HISTORY_SIZE = 3
+
 
 def cos(a, b):
     return np.sum(a * b.T) / (
@@ -158,7 +161,53 @@ def _cosine_fallback_detect(feature, honest_std, nc, alpha=0.5):
     return malicious
 
 
-def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev):
+def detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc):
+    """Detect sign-flip attacks by checking gradient direction correlation.
+
+    Sign-flipped updates have a consistently negative dot product with the
+    historical honest update direction.  At least two rounds of history are
+    required for a reliable reference direction.
+
+    Parameters
+    ----------
+    Upload_Parameters    : list of state-dict-like dicts, one per client.
+    honest_update_history: list of averaged honest update dicts from past rounds.
+    nc                   : total number of clients.
+
+    Returns
+    -------
+    list of int — indices of clients detected as sign-flip attackers.
+    """
+    if len(honest_update_history) < 2:
+        return []  # Need at least 2 historical updates for a reliable reference
+
+    # Compute the average honest gradient direction over all stored rounds
+    avg_honest_flat = None
+    for historical_update in honest_update_history:
+        flat = torch.cat([historical_update[k].flatten()
+                          for k in sorted(historical_update.keys())])
+        if avg_honest_flat is None:
+            avg_honest_flat = flat.clone()
+        else:
+            avg_honest_flat = avg_honest_flat + flat
+    avg_honest_flat = avg_honest_flat / len(honest_update_history)
+
+    detected = []
+    for c, client_update in enumerate(Upload_Parameters):
+        client_flat = torch.cat([client_update[k].flatten()
+                                 for k in sorted(client_update.keys())])
+        dot_prod = torch.dot(avg_honest_flat, client_flat).item()
+        # Clearly negative dot product → gradient direction is flipped
+        if dot_prod < -0.1:
+            detected.append(c)
+
+    if detected:
+        print("  [Sign-Flip Detection] Detected flip attacks at clients: {}".format(detected))
+    return detected
+
+
+def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev,
+                            honest_update_history=None):
     nc = cfg["num_of_clients"]
     if cfg["data_name"] == "mnist":
         k1 = torch.zeros(nc, 10, 1, 5, 5).to(dev)
@@ -245,6 +294,12 @@ def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev):
     except Exception as e:
         print("  [Warning] DBSCAN failed ({}), using cosine fallback".format(e))
         malicious = _cosine_fallback_detect(feature, honest_std, nc, cfg["alpha"])
+
+    # ── Phase 2: Sign-flip detection (ensemble with VQC) ─────────────────────
+    if honest_update_history is not None:
+        flip_detected = detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc)
+        if flip_detected:
+            malicious = list(set(malicious) | set(flip_detected))
 
     return malicious
 
@@ -339,6 +394,7 @@ def run_experiment(cfg, verbose=True):
 
     round_results = []
     start = time.time()
+    honest_update_history = []
 
     for rnd in range(cfg["num_comm"]):
         rnd_start = time.time()
@@ -372,9 +428,22 @@ def run_experiment(cfg, verbose=True):
             nc, cfg["epoch"], cfg["batchsize"], net, loss_func, opti, global_parameters,
             data_name=cfg["data_name"]
         )
+
+        # Track average honest update for sign-flip detection history
+        if Upload_Parameters:
+            avg_honest = {}
+            for k in Upload_Parameters[0]:
+                avg_honest[k] = torch.stack(
+                    [u[k].clone() for u in Upload_Parameters]
+                ).mean(dim=0)
+            honest_update_history.append(avg_honest)
+            if len(honest_update_history) > _HONEST_UPDATE_HISTORY_SIZE:
+                honest_update_history.pop(0)
+
         Upload_Parameters.extend(byz_uploads)
 
-        detected = vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev)
+        detected = vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev,
+                                          honest_update_history)
 
         global_parameters = fed_avg(list(Upload_Parameters), detected)
 
