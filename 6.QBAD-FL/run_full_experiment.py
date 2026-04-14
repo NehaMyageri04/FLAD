@@ -63,6 +63,10 @@ _DBSCAN_MIN_EPS = 0.05
 # Number of previous rounds of honest updates to retain for sign-flip detection.
 _HONEST_UPDATE_HISTORY_SIZE = 3
 
+# Dot-product threshold for sign-flip detection: updates with a dot product
+# below this value against the historical honest direction are flagged.
+_SIGN_FLIP_DOT_PRODUCT_THRESHOLD = -0.1
+
 
 def _cos(a, b):
     return np.sum(a * b.T) / (
@@ -166,7 +170,7 @@ def _detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc):
                                  for k in sorted(client_update.keys())])
         dot_prod = torch.dot(avg_honest_flat, client_flat).item()
         # Clearly negative dot product → gradient direction is flipped
-        if dot_prod < -0.1:
+        if dot_prod < _SIGN_FLIP_DOT_PRODUCT_THRESHOLD:
             detected.append(c)
 
     return detected
@@ -341,7 +345,9 @@ def run_single_experiment(cfg, verbose=True):
                     lp[k] = Attack.AGR_agnostic(honest_all_weight[k])
             uploads.append(lp)
 
-        # Track average honest update for sign-flip detection history
+        # Track average honest update for sign-flip detection history.
+        # Honest clients are appended to `uploads` first (indices 0..nc-byz-1),
+        # followed by Byzantine clients — the slice [:nc-byz] is always honest.
         if uploads:
             honest_uploads = uploads[:nc - byz]
             if honest_uploads:

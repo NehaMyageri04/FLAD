@@ -62,6 +62,10 @@ _FALLBACK_THRESHOLD_STDEV = 1.5
 # Number of previous rounds of honest updates to retain for sign-flip detection.
 _HONEST_UPDATE_HISTORY_SIZE = 3
 
+# Dot-product threshold for sign-flip detection: updates with a dot product
+# below this value against the historical honest direction are flagged.
+_SIGN_FLIP_DOT_PRODUCT_THRESHOLD = -0.1
+
 
 def cos(a, b):
     return np.sum(a * b.T) / (
@@ -194,7 +198,7 @@ def detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc):
                                  for k in sorted(client_update.keys())])
         dot_prod = torch.dot(avg_honest_flat, client_flat).item()
         # Clearly negative dot product → gradient direction is flipped
-        if dot_prod < -0.1:
+        if dot_prod < _SIGN_FLIP_DOT_PRODUCT_THRESHOLD:
             detected.append(c)
 
     if detected:
@@ -425,7 +429,9 @@ def run_experiment(cfg, verbose=True):
             data_name=cfg["data_name"]
         )
 
-        # Track average honest update for sign-flip detection history
+        # Track average honest update for sign-flip detection history.
+        # At this point Upload_Parameters contains only honest client uploads
+        # (Byzantine uploads are not yet appended below via .extend).
         if Upload_Parameters:
             avg_honest = {}
             for k in Upload_Parameters[0]:
