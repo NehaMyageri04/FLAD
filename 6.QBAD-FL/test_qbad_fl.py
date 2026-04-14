@@ -182,15 +182,11 @@ def detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc):
         return []  # Need at least 2 historical updates for a reliable reference
 
     # Compute the average honest gradient direction over all stored rounds
-    avg_honest_flat = None
-    for historical_update in honest_update_history:
-        flat = torch.cat([historical_update[k].flatten()
-                          for k in sorted(historical_update.keys())])
-        if avg_honest_flat is None:
-            avg_honest_flat = flat.clone()
-        else:
-            avg_honest_flat = avg_honest_flat + flat
-    avg_honest_flat = avg_honest_flat / len(honest_update_history)
+    all_flats = [
+        torch.cat([h[k].flatten() for k in sorted(h.keys())])
+        for h in honest_update_history
+    ]
+    avg_honest_flat = torch.stack(all_flats).mean(dim=0)
 
     detected = []
     for c, client_update in enumerate(Upload_Parameters):
