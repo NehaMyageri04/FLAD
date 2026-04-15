@@ -59,6 +59,10 @@ _HONEST_UPDATE_HISTORY_SIZE = 3
 
 # Default fraction of clients treated as anomalies by Isolation Forest.
 _IFOREST_CONTAMINATION = 0.25
+# Fixed Isolation Forest ensemble size.
+_IFOREST_N_ESTIMATORS = 100
+# Midpoint fallback for NaN VQC features in [0, 1] expectation-value space.
+_FEATURE_NAN_FALLBACK = 0.5
 
 # Cosine-similarity threshold for sign-flip detection: updates whose cosine
 # similarity with the historical honest direction falls below this value are
@@ -74,7 +78,25 @@ def cos(a, b):
 
 
 def feature_extraction_model(Central_par, cfg, dev):
-    """Initialize fixed quantum detectors (no VQC training)."""
+    """Initialize two separate fixed QuantumByzantineDetectors.
+
+    One detector maps flattened conv1 weights and one maps flattened fc weights
+    to quantum features, without any training loop.
+
+    Parameters
+    ----------
+    Central_par : list
+        Unused central-model snapshots (kept for interface compatibility).
+    cfg : dict
+        Experiment configuration containing dataset name.
+    dev : torch.device
+        Device to place detectors on.
+
+    Returns
+    -------
+    tuple
+        (detector_conv1, detector_fc) fixed quantum feature extractors.
+    """
     if cfg["data_name"] == "mnist":
         detector_conv1 = QuantumByzantineDetector(dimen=10 * 1 * 5 * 5, num_qubits=8, num_layers=5)
         detector_fc = QuantumByzantineDetector(dimen=10 * 320, num_qubits=8, num_layers=5)
@@ -189,15 +211,29 @@ def vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, 
             k1[i] = W["module.conv1.weight"].data
             w3[i] = W["module.fc.weight"].data
 
-    print("  [VQC] Extracting quantum features (24-D per detector)...")
+    print("  [VQC] Extracting quantum features (24-D per detector, 48-D total)...")
     with torch.no_grad():
         features_conv1 = detector_conv1(k1.view(nc, -1)).cpu().numpy()
         features_fc = detector_fc(w3.view(nc, -1)).cpu().numpy()
+    expected_conv1_dim = detector_conv1.num_qubits * 3
+    expected_fc_dim = detector_fc.num_qubits * 3
+    if features_conv1.shape != (nc, expected_conv1_dim):
+        raise ValueError(
+            "Unexpected conv1 feature shape: {} (expected ({}, {}))".format(
+                features_conv1.shape, nc, expected_conv1_dim
+            )
+        )
+    if features_fc.shape != (nc, expected_fc_dim):
+        raise ValueError(
+            "Unexpected fc feature shape: {} (expected ({}, {}))".format(
+                features_fc.shape, nc, expected_fc_dim
+            )
+        )
     feature = np.concatenate([features_conv1, features_fc], axis=1)
 
     if np.isnan(feature).any():
         print("  [Warning] NaN in features, replacing with column means")
-        col_mean = np.nan_to_num(np.nanmean(feature, axis=0), nan=0.5)
+        col_mean = np.nan_to_num(np.nanmean(feature, axis=0), nan=_FEATURE_NAN_FALLBACK)
         feature = np.where(np.isnan(feature), col_mean, feature)
 
     print("  [VQC] Feature shape: {}".format(feature.shape))
@@ -209,7 +245,9 @@ def vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, 
     malicious = []
     try:
         clf = IsolationForest(
-            contamination=_IFOREST_CONTAMINATION, random_state=42, n_estimators=100
+            contamination=_IFOREST_CONTAMINATION,
+            random_state=42,
+            n_estimators=_IFOREST_N_ESTIMATORS,
         )
         predictions = clf.fit_predict(feature)
         malicious = [c for c in range(nc) if predictions[c] == -1]

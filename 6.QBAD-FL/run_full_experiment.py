@@ -60,6 +60,10 @@ _HONEST_UPDATE_HISTORY_SIZE = 3
 
 # Default fraction of clients treated as anomalies by Isolation Forest.
 _IFOREST_CONTAMINATION = 0.25
+# Fixed Isolation Forest ensemble size.
+_IFOREST_N_ESTIMATORS = 100
+# Midpoint fallback for NaN VQC features in [0, 1] expectation-value space.
+_FEATURE_NAN_FALLBACK = 0.5
 
 # Cosine-similarity threshold for sign-flip detection: updates whose cosine
 # similarity with the historical honest direction falls below this value are
@@ -74,8 +78,21 @@ def _cos(a, b):
     )
 
 
-def _feature_extraction_model(Central_par, data_name, dev):
-    del Central_par  # Unused: detectors are fixed feature extractors (no training).
+def _feature_extraction_model(data_name, dev):
+    """Initialize fixed conv1/fc quantum feature extractors.
+
+    Parameters
+    ----------
+    data_name : str
+        Dataset identifier ("mnist" or "cifar_10").
+    dev : torch.device
+        Device to place detectors on.
+
+    Returns
+    -------
+    tuple
+        (detector_conv1, detector_fc) fixed quantum feature extractors.
+    """
     if data_name == "mnist":
         detector_conv1 = QuantumByzantineDetector(dimen=10 * 1 * 5 * 5, num_qubits=8, num_layers=5)
         detector_fc = QuantumByzantineDetector(dimen=10 * 320, num_qubits=8, num_layers=5)
@@ -146,6 +163,7 @@ def _detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc):
 
 def _vqc_detect(Upload_Parameters, detector_conv1, detector_fc, nc, data_name, alpha, dev,
                 honest_update_history=None):
+    """Run no-training VQC feature extraction + Isolation Forest detection."""
     if data_name == "mnist":
         k1 = torch.zeros(nc, 10, 1, 5, 5).to(dev)
         w3 = torch.zeros(nc, 10, 320).to(dev)
@@ -159,15 +177,29 @@ def _vqc_detect(Upload_Parameters, detector_conv1, detector_fc, nc, data_name, a
         else:
             k1[i] = W["module.conv1.weight"].data
             w3[i] = W["module.fc.weight"].data
-    print("    [VQC] Extracting quantum features (24-D per detector)...")
+    print("    [VQC] Extracting quantum features (24-D per detector, 48-D total)...")
     with torch.no_grad():
         feature_conv1 = detector_conv1(k1.view(nc, -1)).cpu().numpy()
         feature_fc = detector_fc(w3.view(nc, -1)).cpu().numpy()
+    expected_conv1_dim = detector_conv1.num_qubits * 3
+    expected_fc_dim = detector_fc.num_qubits * 3
+    if feature_conv1.shape != (nc, expected_conv1_dim):
+        raise ValueError(
+            "Unexpected conv1 feature shape: {} (expected ({}, {}))".format(
+                feature_conv1.shape, nc, expected_conv1_dim
+            )
+        )
+    if feature_fc.shape != (nc, expected_fc_dim):
+        raise ValueError(
+            "Unexpected fc feature shape: {} (expected ({}, {}))".format(
+                feature_fc.shape, nc, expected_fc_dim
+            )
+        )
     feature = np.concatenate([feature_conv1, feature_fc], axis=1)
 
     if np.isnan(feature).any():
         print("    [Warning] NaN in features, replacing with column means")
-        col_mean = np.nan_to_num(np.nanmean(feature, axis=0), nan=0.5)
+        col_mean = np.nan_to_num(np.nanmean(feature, axis=0), nan=_FEATURE_NAN_FALLBACK)
         feature = np.where(np.isnan(feature), col_mean, feature)
 
     print("    [VQC] Feature shape: {}".format(feature.shape))
@@ -177,14 +209,19 @@ def _vqc_detect(Upload_Parameters, detector_conv1, detector_fc, nc, data_name, a
 
     try:
         clf = IsolationForest(
-            contamination=_IFOREST_CONTAMINATION, random_state=42, n_estimators=100
+            contamination=_IFOREST_CONTAMINATION,
+            random_state=42,
+            n_estimators=_IFOREST_N_ESTIMATORS,
         )
         predictions = clf.fit_predict(feature)
         print("    [Isolation Forest] Predictions: {}".format(predictions.tolist()))
         malicious = [c for c in range(nc) if predictions[c] == -1]
         print("    [VQC Detection] Detected {} anomalies: {}".format(len(malicious), malicious))
     except Exception as e:
-        print("    [Warning] Isolation Forest failed: {}".format(e))
+        print(
+            "    [Warning] Isolation Forest failed: {}. No anomalies will be flagged this round; "
+            "check feature statistics and detector outputs.".format(e)
+        )
         malicious = []
 
     # ── Phase 2: Sign-flip detection (ensemble with VQC) ─────────────────────
@@ -259,7 +296,7 @@ def run_single_experiment(cfg, verbose=True):
         Central_par = myClients.centralTrain(
             cfg["epoch"], cfg["batchsize"], net, loss_func, opti, global_parameters
         )
-        detector_conv1, detector_fc = _feature_extraction_model(Central_par, cfg["data_name"], dev)
+        detector_conv1, detector_fc = _feature_extraction_model(cfg["data_name"], dev)
 
         uploads = []
         honest_all_weight = None
