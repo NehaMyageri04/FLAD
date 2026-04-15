@@ -161,6 +161,7 @@ class QuantumByzantineDetector(nn.Module):
 
         @qml.qnode(_dev, interface="torch", diff_method="parameter-shift")
         def _circuit(inputs, weights):
+            """Return ⟨X⟩, ⟨Y⟩, ⟨Z⟩ expectation values for each qubit."""
             qml.AngleEmbedding(inputs, wires=range(num_qubits))
             qml.StronglyEntanglingLayers(weights, wires=range(num_qubits))
             return [qml.expval(obs) for obs in self.observables]

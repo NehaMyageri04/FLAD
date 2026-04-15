@@ -178,7 +178,7 @@ def _detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc):
 
 
 def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev,
-                honest_update_history=None):
+                iforest_contamination=0.25, honest_update_history=None):
     if data_name == "mnist":
         k1 = torch.zeros(nc, 10, 1, 5, 5).to(dev)
         w3 = torch.zeros(nc, 10, 320).to(dev)
@@ -209,7 +209,7 @@ def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev,
         feature = np.where(np.isnan(feature), col_mean, feature)
 
     try:
-        clf = IsolationForest(contamination=0.25, random_state=42)
+        clf = IsolationForest(contamination=iforest_contamination, random_state=42)
         predictions = clf.fit_predict(feature)
         malicious = [c for c in range(nc) if predictions[c] == -1]
     except Exception as e:
@@ -353,8 +353,10 @@ def run_single_experiment(cfg, verbose=True):
                 if len(honest_update_history) > _HONEST_UPDATE_HISTORY_SIZE:
                     honest_update_history.pop(0)
 
-        detected = _vqc_detect(uploads, FC, Std, Dis, nc, cfg["data_name"], cfg["alpha"], dev,
-                               honest_update_history)
+        detected = _vqc_detect(
+            uploads, FC, Std, Dis, nc, cfg["data_name"], cfg["alpha"], dev,
+            cfg.get("iforest_contamination", 0.25), honest_update_history
+        )
         global_parameters = _fed_avg(list(uploads), detected)
 
         net.load_state_dict(global_parameters, strict=True)
@@ -521,6 +523,7 @@ def main():
         "central_data_size": 300,
         "central_data_pro": 0.1,
         "alpha": 0.5,
+        "iforest_contamination": 0.25,
     }
 
     total_start = time.time()

@@ -255,8 +255,9 @@ def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev,
 
     # ── Primary detection: Isolation Forest ───────────────────────────────────
     malicious = []
+    contamination = cfg.get("iforest_contamination", 0.25)
     try:
-        clf = IsolationForest(contamination=0.25, random_state=42)
+        clf = IsolationForest(contamination=contamination, random_state=42)
         predictions = clf.fit_predict(feature)
         malicious = [c for c in range(nc) if predictions[c] == -1]
         print("  [Debug] Isolation Forest predictions: {}".format(predictions.tolist()))
@@ -507,6 +508,7 @@ def _default_config():
         "central_data_size": 300,
         "central_data_pro": 0.1,
         "alpha": 0.5,
+        "iforest_contamination": 0.25,
     }
 
 
