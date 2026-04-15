@@ -116,8 +116,8 @@ class QuantumByzantineDetector(nn.Module):
     """Quantum Byzantine Detector — wraps a VQC as a ``torch.nn.Module``.
 
     This class is a drop-in replacement for ``LinearNet`` in the FLAD pipeline.
-    It accepts the same high-dimensional weight vector as input and produces the
-    same scalar output format, but uses a Variational Quantum Circuit internally.
+    It accepts the same high-dimensional weight vector as input and produces a
+    multi-observable output vector using a Variational Quantum Circuit.
 
     Architecture
     ------------
@@ -126,9 +126,9 @@ class QuantumByzantineDetector(nn.Module):
        maps each through tanh → values in (-1, 1).
     2. **Normalisation**       : Rescales from (-1, 1) to [0, π] per feature.
     3. **VQC forward pass**    : AngleEmbedding + StronglyEntanglingLayers.
-    4. **Readout**             : ⟨Z⟩ on the last qubit mapped from [-1,1] to
-                                  [0,1] and then squared (matching the
-                                  ``LinearNet`` output format of ``x**2``).
+    4. **Readout**             : ⟨X⟩, ⟨Y⟩, ⟨Z⟩ on each qubit (3×num_qubits
+                                  outputs) mapped from [-1,1] to [0,1] and
+                                  then squared.
 
     Parameters
     ----------
@@ -147,6 +147,11 @@ class QuantumByzantineDetector(nn.Module):
         self.dimen = dimen
         self.num_qubits = num_qubits
         self.num_layers = num_layers
+        self.observables = (
+            [qml.PauliX(i) for i in range(num_qubits)] +
+            [qml.PauliY(i) for i in range(num_qubits)] +
+            [qml.PauliZ(i) for i in range(num_qubits)]
+        )
 
         # Build a per-instance QNode so that instances are independent
         _dev = qml.device("default.qubit", wires=num_qubits)
@@ -156,9 +161,10 @@ class QuantumByzantineDetector(nn.Module):
 
         @qml.qnode(_dev, interface="torch", diff_method="parameter-shift")
         def _circuit(inputs, weights):
+            """Return [⟨X0..Xn⟩, ⟨Y0..Yn⟩, ⟨Z0..Zn⟩] expectation values."""
             qml.AngleEmbedding(inputs, wires=range(num_qubits))
             qml.StronglyEntanglingLayers(weights, wires=range(num_qubits))
-            return qml.expval(qml.PauliZ(num_qubits - 1))
+            return [qml.expval(obs) for obs in self.observables]
 
         # TorchLayer registers variational weights as nn.Parameters
         self.qlayer = qml.qnn.TorchLayer(_circuit, {"weights": _weight_shape})
@@ -215,7 +221,7 @@ class QuantumByzantineDetector(nn.Module):
     # ── Forward pass ──────────────────────────────────────────────────────────
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run each sample through the VQC and return a *(batch, 1)* tensor.
+        """Run each sample through the VQC and return a *(batch, 3*num_qubits)* tensor.
 
         Quantum circuits execute on CPU regardless of the caller's device; the
         method handles device transfers transparently.
@@ -230,11 +236,11 @@ class QuantumByzantineDetector(nn.Module):
         # Process one sample at a time (quantum circuit is inherently sequential)
         outputs = []
         for i in range(encoded.size(0)):
-            out = self.qlayer(encoded[i])  # scalar tensor
+            out = self.qlayer(encoded[i])  # (3*num_qubits,) tensor
             outputs.append(out)
 
-        outputs = torch.stack(outputs, dim=0)          # (batch,)
+        outputs = torch.stack(outputs, dim=0)          # (batch, 3*num_qubits)
         outputs = torch.nan_to_num(outputs, nan=0.5)   # replace NaN with neutral value
-        outputs = ((1.0 + outputs) / 2.0).view(-1, 1)  # map [-1,1]→[0,1], reshape
+        outputs = ((1.0 + outputs) / 2.0)              # map [-1,1]→[0,1]
 
-        return outputs ** 2  # match LinearNet's x**2 output scaling
+        return outputs ** 2
