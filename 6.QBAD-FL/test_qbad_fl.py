@@ -529,6 +529,12 @@ def main():
         default=None,
         help="Optional path to save JSON results (e.g. results/quick_test.json)",
     )
+    parser.add_argument(
+        "--iid",
+        type=lambda x: x.lower() in ("true", "1", "yes"),
+        default=True,
+        help="Use IID (True) or non-IID (False) data distribution (default: True)",
+    )
     args = parser.parse_args()
 
     if args.quick:
@@ -543,6 +549,7 @@ def main():
     cfg["num_comm"] = args.rounds
     cfg["num_of_clients"] = args.clients
     cfg["byzantine_size"] = args.byzantine
+    cfg["IID"] = args.iid
 
     all_results = []
 
