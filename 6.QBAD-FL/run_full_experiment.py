@@ -31,7 +31,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import optim
-from torch.utils.data import DataLoader
 from sklearn.ensemble import IsolationForest
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -75,52 +74,17 @@ def _cos(a, b):
     )
 
 
-def _train_vqc(weight_train, dimen):
-    weight_train = weight_train.view(weight_train.size(0), -1).cpu()
-    loader = DataLoader(dataset=weight_train, batch_size=1, shuffle=True)
-    model = QuantumByzantineDetector(dimen)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    criterion = torch.nn.MSELoss(reduction="sum")
-    label = torch.ones((1, model.num_qubits * 3))
-    for epoch in range(20):
-        epoch_loss = 0.0
-        for batch in loader:
-            out = model(batch)
-            loss = criterion(out, label)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-        if epoch % 5 == 4:
-            print("    VQC train epoch {}/20  loss={:.4f}".format(epoch + 1, epoch_loss))
-    with torch.no_grad():
-        all_out = model(weight_train)
-    return model, all_out.mean(dim=0), all_out.max() - all_out.min()
-
-
-def _feature_extraction_model(Central_par, data_name):
-    num = len(Central_par)
+def _feature_extraction_model(Central_par, data_name, dev):
+    del Central_par  # Unused: detectors are fixed feature extractors (no training).
     if data_name == "mnist":
-        k1 = torch.zeros(num, 10, 1, 5, 5)
-        w3 = torch.zeros(num, 10, 320)
+        detector_conv1 = QuantumByzantineDetector(dimen=10 * 1 * 5 * 5, num_qubits=8, num_layers=5)
+        detector_fc = QuantumByzantineDetector(dimen=10 * 320, num_qubits=8, num_layers=5)
     else:
-        k1 = torch.zeros(num, 64, 3, 3, 3)
-        w3 = torch.zeros(num, 10, 512)
-    for i, W in enumerate(Central_par):
-        if data_name == "mnist":
-            k1[i] = W["conv1.weight"].data
-            w3[i] = W["fc.weight"].data
-        else:
-            k1[i] = W["module.conv1.weight"].data
-            w3[i] = W["module.fc.weight"].data
-    FC, Std, Dis = {}, {}, {}
-    if data_name == "mnist":
-        FC["conv1.weight"], Std["conv1.weight"], Dis["conv1.weight"] = _train_vqc(k1, 10 * 1 * 5 * 5)
-        FC["fc.weight"], Std["fc.weight"], Dis["fc.weight"] = _train_vqc(w3, 10 * 320)
-    else:
-        FC["conv1.weight"], Std["conv1.weight"], Dis["conv1.weight"] = _train_vqc(k1, 64 * 3 * 3 * 3)
-        FC["fc.weight"], Std["fc.weight"], Dis["fc.weight"] = _train_vqc(w3, 10 * 512)
-    return FC, Std, Dis
+        detector_conv1 = QuantumByzantineDetector(dimen=64 * 3 * 3 * 3, num_qubits=8, num_layers=5)
+        detector_fc = QuantumByzantineDetector(dimen=10 * 512, num_qubits=8, num_layers=5)
+    detector_conv1 = detector_conv1.to(dev) if dev.type != "cpu" else detector_conv1
+    detector_fc = detector_fc.to(dev) if dev.type != "cpu" else detector_fc
+    return detector_conv1, detector_fc
 
 
 def _cosine_fallback_detect(feature, honest_std, nc, alpha=0.5):
@@ -180,8 +144,8 @@ def _detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc):
     return detected
 
 
-def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev,
-                iforest_contamination=_IFOREST_CONTAMINATION, honest_update_history=None):
+def _vqc_detect(Upload_Parameters, detector_conv1, detector_fc, nc, data_name, alpha, dev,
+                honest_update_history=None):
     if data_name == "mnist":
         k1 = torch.zeros(nc, 10, 1, 5, 5).to(dev)
         w3 = torch.zeros(nc, 10, 320).to(dev)
@@ -195,41 +159,33 @@ def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev,
         else:
             k1[i] = W["module.conv1.weight"].data
             w3[i] = W["module.fc.weight"].data
-    feature_conv1 = FC["conv1.weight"](k1.view(nc, -1)).cpu().detach().numpy()
-    feature_fc = FC["fc.weight"](w3.view(nc, -1)).cpu().detach().numpy()
-    if feature_conv1.ndim == 1:
-        feature_conv1 = feature_conv1.reshape(nc, 1)
-    if feature_fc.ndim == 1:
-        feature_fc = feature_fc.reshape(nc, 1)
-    if feature_conv1.ndim != 2 or feature_conv1.shape[0] != nc:
-        raise ValueError(
-            "Unexpected conv1 VQC feature shape: {} (expected 2D with {} rows)".format(
-                feature_conv1.shape, nc
-            )
-        )
-    if feature_fc.ndim != 2 or feature_fc.shape[0] != nc:
-        raise ValueError(
-            "Unexpected fc VQC feature shape: {} (expected 2D with {} rows)".format(
-                feature_fc.shape, nc
-            )
-        )
+    print("    [VQC] Extracting quantum features (24-D per detector)...")
+    with torch.no_grad():
+        feature_conv1 = detector_conv1(k1.view(nc, -1)).cpu().numpy()
+        feature_fc = detector_fc(w3.view(nc, -1)).cpu().numpy()
     feature = np.concatenate([feature_conv1, feature_fc], axis=1)
 
     if np.isnan(feature).any():
-        col_mean = np.nan_to_num(np.nanmean(feature, axis=0), nan=0.0)
+        print("    [Warning] NaN in features, replacing with column means")
+        col_mean = np.nan_to_num(np.nanmean(feature, axis=0), nan=0.5)
         feature = np.where(np.isnan(feature), col_mean, feature)
 
+    print("    [VQC] Feature shape: {}".format(feature.shape))
+    print("      Feature ranges: min={:.4f}  max={:.4f}  mean={:.4f}".format(
+        feature.min(), feature.max(), feature.mean()
+    ))
+
     try:
-        clf = IsolationForest(contamination=iforest_contamination, random_state=42)
+        clf = IsolationForest(
+            contamination=_IFOREST_CONTAMINATION, random_state=42, n_estimators=100
+        )
         predictions = clf.fit_predict(feature)
+        print("    [Isolation Forest] Predictions: {}".format(predictions.tolist()))
         malicious = [c for c in range(nc) if predictions[c] == -1]
+        print("    [VQC Detection] Detected {} anomalies: {}".format(len(malicious), malicious))
     except Exception as e:
-        print("    [Warning] Isolation Forest failed ({}), using cosine fallback".format(e))
-        honest_std = np.concatenate([
-            Std["conv1.weight"].detach().cpu().numpy().reshape(-1),
-            Std["fc.weight"].detach().cpu().numpy().reshape(-1),
-        ])
-        malicious = _cosine_fallback_detect(feature, honest_std, nc, alpha)
+        print("    [Warning] Isolation Forest failed: {}".format(e))
+        malicious = []
 
     # ── Phase 2: Sign-flip detection (ensemble with VQC) ─────────────────────
     vqc_detected = list(malicious)
@@ -303,7 +259,7 @@ def run_single_experiment(cfg, verbose=True):
         Central_par = myClients.centralTrain(
             cfg["epoch"], cfg["batchsize"], net, loss_func, opti, global_parameters
         )
-        FC, Std, Dis = _feature_extraction_model(Central_par, cfg["data_name"])
+        detector_conv1, detector_fc = _feature_extraction_model(Central_par, cfg["data_name"], dev)
 
         uploads = []
         honest_all_weight = None
@@ -365,8 +321,8 @@ def run_single_experiment(cfg, verbose=True):
                     honest_update_history.pop(0)
 
         detected = _vqc_detect(
-            uploads, FC, Std, Dis, nc, cfg["data_name"], cfg["alpha"], dev,
-            cfg.get("iforest_contamination", _IFOREST_CONTAMINATION), honest_update_history
+            uploads, detector_conv1, detector_fc, nc, cfg["data_name"], cfg["alpha"], dev,
+            honest_update_history
         )
         global_parameters = _fed_avg(list(uploads), detected)
 
