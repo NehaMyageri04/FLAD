@@ -26,7 +26,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import optim
-from torch.utils.data import DataLoader
 from sklearn.ensemble import IsolationForest
 
 # Ensure we can import from the 6.QBAD-FL directory itself
@@ -60,6 +59,10 @@ _HONEST_UPDATE_HISTORY_SIZE = 3
 
 # Default fraction of clients treated as anomalies by Isolation Forest.
 _IFOREST_CONTAMINATION = 0.25
+# Fixed Isolation Forest ensemble size.
+_IFOREST_N_ESTIMATORS = 100
+# Midpoint fallback for NaN VQC features in [0, 1] expectation-value space.
+_FEATURE_NAN_FALLBACK = 0.5
 
 # Cosine-similarity threshold for sign-flip detection: updates whose cosine
 # similarity with the historical honest direction falls below this value are
@@ -74,60 +77,36 @@ def cos(a, b):
     )
 
 
-def train_vqc(weight_train, dimen, dev):
-    """Train QuantumByzantineDetector on server central weights."""
-    weight_train = weight_train.view(weight_train.size(0), -1).cpu()
-    loader = DataLoader(dataset=weight_train, batch_size=1, shuffle=True)
-    model = QuantumByzantineDetector(dimen)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    criterion = torch.nn.MSELoss(reduction="sum")
-    label = torch.ones((1, model.num_qubits * 3))
-    for epoch in range(20):
-        epoch_loss = 0.0
-        for batch in loader:
-            output = model(batch)
-            loss = criterion(output, label)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-        if epoch % 5 == 4:
-            print("    VQC train epoch {}/20  loss={:.4f}".format(epoch + 1, epoch_loss))
-    with torch.no_grad():
-        all_output = model(weight_train)
-    print("    VQC outputs on clean data: min={:.4f}  max={:.4f}  mean={:.4f}".format(
-        all_output.min().item(), all_output.max().item(), all_output.mean().item()
-    ))
-    std = all_output.mean(dim=0)
-    dis = all_output.max() - all_output.min()
-    return model, std, dis
-
-
 def feature_extraction_model(Central_par, cfg, dev):
-    num = len(Central_par)
-    if cfg["data_name"] == "mnist":
-        k1 = torch.zeros(num, 10, 1, 5, 5)
-        w3 = torch.zeros(num, 10, 320)
-    else:
-        k1 = torch.zeros(num, 64, 3, 3, 3)
-        w3 = torch.zeros(num, 10, 512)
+    """Initialize two separate fixed QuantumByzantineDetectors.
 
-    for i, W in enumerate(Central_par):
-        if cfg["data_name"] == "cifar_10":
-            k1[i] = W["module.conv1.weight"].data
-            w3[i] = W["module.fc.weight"].data
-        else:
-            k1[i] = W["conv1.weight"].data
-            w3[i] = W["fc.weight"].data
+    One detector maps flattened conv1 weights and one maps flattened fc weights
+    to quantum features, without any training loop.
 
-    FC, Std, Dis = {}, {}, {}
+    Parameters
+    ----------
+    Central_par : list
+        Unused central-model snapshots (kept for interface compatibility).
+    cfg : dict
+        Experiment configuration containing dataset name.
+    dev : torch.device
+        Device to place detectors on.
+
+    Returns
+    -------
+    tuple
+        (detector_conv1, detector_fc) fixed quantum feature extractors.
+    """
     if cfg["data_name"] == "mnist":
-        FC["conv1.weight"], Std["conv1.weight"], Dis["conv1.weight"] = train_vqc(k1, 10 * 1 * 5 * 5, dev)
-        FC["fc.weight"], Std["fc.weight"], Dis["fc.weight"] = train_vqc(w3, 10 * 320, dev)
+        detector_conv1 = QuantumByzantineDetector(dimen=10 * 1 * 5 * 5, num_qubits=8, num_layers=5)
+        detector_fc = QuantumByzantineDetector(dimen=10 * 320, num_qubits=8, num_layers=5)
     else:
-        FC["conv1.weight"], Std["conv1.weight"], Dis["conv1.weight"] = train_vqc(k1, 64 * 3 * 3 * 3, dev)
-        FC["fc.weight"], Std["fc.weight"], Dis["fc.weight"] = train_vqc(w3, 10 * 512, dev)
-    return FC, Std, Dis
+        detector_conv1 = QuantumByzantineDetector(dimen=64 * 3 * 3 * 3, num_qubits=8, num_layers=5)
+        detector_fc = QuantumByzantineDetector(dimen=10 * 512, num_qubits=8, num_layers=5)
+
+    detector_conv1 = detector_conv1.to(dev) if dev.type != "cpu" else detector_conv1
+    detector_fc = detector_fc.to(dev) if dev.type != "cpu" else detector_fc
+    return detector_conv1, detector_fc
 
 
 def _cosine_fallback_detect(feature, honest_std, nc, alpha=0.5):
@@ -213,8 +192,9 @@ def detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc):
     return detected
 
 
-def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev,
+def vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, dev,
                             honest_update_history=None):
+    """Extract quantum features and detect anomalies via Isolation Forest."""
     nc = cfg["num_of_clients"]
     if cfg["data_name"] == "mnist":
         k1 = torch.zeros(nc, 10, 1, 5, 5).to(dev)
@@ -231,55 +211,51 @@ def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev,
             k1[i] = W["module.conv1.weight"].data
             w3[i] = W["module.fc.weight"].data
 
-    feature_conv1 = FC["conv1.weight"](k1.view(nc, -1)).cpu().detach().numpy()
-    feature_fc = FC["fc.weight"](w3.view(nc, -1)).cpu().detach().numpy()
-    if feature_conv1.ndim == 1:
-        feature_conv1 = feature_conv1.reshape(nc, 1)
-    if feature_fc.ndim == 1:
-        feature_fc = feature_fc.reshape(nc, 1)
-    if feature_conv1.ndim != 2 or feature_conv1.shape[0] != nc:
+    print("  [VQC] Extracting quantum features (24-D per detector, 48-D total)...")
+    with torch.no_grad():
+        features_conv1 = detector_conv1(k1.view(nc, -1)).cpu().numpy()
+        features_fc = detector_fc(w3.view(nc, -1)).cpu().numpy()
+    expected_conv1_dim = detector_conv1.num_qubits * 3
+    expected_fc_dim = detector_fc.num_qubits * 3
+    if features_conv1.shape != (nc, expected_conv1_dim):
         raise ValueError(
-            "Unexpected conv1 VQC feature shape: {} (expected 2D with {} rows)".format(
-                feature_conv1.shape, nc
+            "Unexpected conv1 feature shape: {} (expected ({}, {}))".format(
+                features_conv1.shape, nc, expected_conv1_dim
             )
         )
-    if feature_fc.ndim != 2 or feature_fc.shape[0] != nc:
+    if features_fc.shape != (nc, expected_fc_dim):
         raise ValueError(
-            "Unexpected fc VQC feature shape: {} (expected 2D with {} rows)".format(
-                feature_fc.shape, nc
+            "Unexpected fc feature shape: {} (expected ({}, {}))".format(
+                features_fc.shape, nc, expected_fc_dim
             )
         )
-    feature = np.concatenate([feature_conv1, feature_fc], axis=1)
+    feature = np.concatenate([features_conv1, features_fc], axis=1)
 
     if np.isnan(feature).any():
-        print("  [Warning] NaN values detected in VQC features - replacing with column means")
-        col_mean = np.nan_to_num(np.nanmean(feature, axis=0), nan=0.0)
+        print("  [Warning] NaN in features, replacing with column means")
+        col_mean = np.nan_to_num(np.nanmean(feature, axis=0), nan=_FEATURE_NAN_FALLBACK)
         feature = np.where(np.isnan(feature), col_mean, feature)
 
-    print("  [Debug] VQC features shape: {}".format(feature.shape))
-    print("    Min per dim: [{}]".format(
-        " ".join("{:.4f}".format(v) for v in feature.min(axis=0))
-    ))
-    print("    Max per dim: [{}]".format(
-        " ".join("{:.4f}".format(v) for v in feature.max(axis=0))
+    print("  [VQC] Feature shape: {}".format(feature.shape))
+    print("    Feature ranges: min={:.4f}  max={:.4f}  mean={:.4f}".format(
+        feature.min(), feature.max(), feature.mean()
     ))
 
     # ── Primary detection: Isolation Forest ───────────────────────────────────
     malicious = []
-    contamination = cfg.get("iforest_contamination", _IFOREST_CONTAMINATION)
     try:
-        clf = IsolationForest(contamination=contamination, random_state=42)
+        clf = IsolationForest(
+            contamination=_IFOREST_CONTAMINATION,
+            random_state=42,
+            n_estimators=_IFOREST_N_ESTIMATORS,
+        )
         predictions = clf.fit_predict(feature)
         malicious = [c for c in range(nc) if predictions[c] == -1]
-        print("  [Debug] Isolation Forest predictions: {}".format(predictions.tolist()))
+        print("  [Isolation Forest] Predictions: {}".format(predictions.tolist()))
         print("  [VQC Detection] Detected {} anomalies: {}".format(len(malicious), malicious))
     except Exception as e:
-        print("  [Warning] Isolation Forest failed ({}), using cosine fallback".format(e))
-        honest_std = np.concatenate([
-            Std["conv1.weight"].detach().cpu().numpy().reshape(-1),
-            Std["fc.weight"].detach().cpu().numpy().reshape(-1),
-        ])
-        malicious = _cosine_fallback_detect(feature, honest_std, nc, cfg["alpha"])
+        print("  [Warning] Isolation Forest failed: {}".format(e))
+        malicious = []
 
     # ── Phase 2: Sign-flip detection (ensemble with VQC) ─────────────────────
     vqc_detected = list(malicious)
@@ -396,7 +372,7 @@ def run_experiment(cfg, verbose=True):
         Central_par = myClients.centralTrain(
             cfg["epoch"], cfg["batchsize"], net, loss_func, opti, global_parameters
         )
-        FC, Std, Dis = feature_extraction_model(Central_par, cfg, dev)
+        detector_conv1, detector_fc = feature_extraction_model(Central_par, cfg, dev)
 
         Upload_Parameters = []
         honest_all_weight = None
@@ -436,7 +412,7 @@ def run_experiment(cfg, verbose=True):
 
         Upload_Parameters.extend(byz_uploads)
 
-        detected = vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev,
+        detected = vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, dev,
                                           honest_update_history)
 
         global_parameters = fed_avg(list(Upload_Parameters), detected)
