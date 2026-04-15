@@ -32,7 +32,7 @@ import torch
 import torch.nn.functional as F
 from torch import optim
 from torch.utils.data import DataLoader
-from sklearn.cluster import DBSCAN
+from sklearn.ensemble import IsolationForest
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
@@ -56,10 +56,6 @@ from metrics import (
 
 # ── Internal FL helpers ───────────────────────────────────────────────────────
 
-# Minimum per-axis epsilon for DBSCAN: prevents eps→0 when VQC converges
-# tightly on clean data (which would make all points become noise).
-_DBSCAN_MIN_EPS = 0.05
-
 # Number of previous rounds of honest updates to retain for sign-flip detection.
 _HONEST_UPDATE_HISTORY_SIZE = 3
 
@@ -82,7 +78,7 @@ def _train_vqc(weight_train, dimen):
     model = QuantumByzantineDetector(dimen)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     criterion = torch.nn.MSELoss(reduction="sum")
-    label = torch.tensor([[1.0]])
+    label = torch.ones((1, model.num_qubits * 3))
     for epoch in range(20):
         epoch_loss = 0.0
         for batch in loader:
@@ -196,44 +192,24 @@ def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev,
         else:
             k1[i] = W["module.conv1.weight"].data
             w3[i] = W["module.fc.weight"].data
-    feature = np.zeros([nc, 2])
-    feature[:, 0] = FC["conv1.weight"](k1.view(nc, -1)).cpu().detach().numpy().reshape(nc,)
-    feature[:, 1] = FC["fc.weight"](w3.view(nc, -1)).cpu().detach().numpy().reshape(nc,)
+    feature_conv1 = FC["conv1.weight"](k1.view(nc, -1)).cpu().detach().numpy()
+    feature_fc = FC["fc.weight"](w3.view(nc, -1)).cpu().detach().numpy()
+    if feature_conv1.ndim == 1:
+        feature_conv1 = feature_conv1.reshape(nc, 1)
+    if feature_fc.ndim == 1:
+        feature_fc = feature_fc.reshape(nc, 1)
+    feature = np.concatenate([feature_conv1, feature_fc], axis=1)
 
     if np.isnan(feature).any():
         col_mean = np.nan_to_num(np.nanmean(feature, axis=0), nan=0.0)
         feature = np.where(np.isnan(feature), col_mean, feature)
 
-    honest_std = np.array([Std["conv1.weight"].item(), Std["fc.weight"].item()])
-    honest_L2 = np.sqrt(np.sum(honest_std * honest_std.T)) + 1e-9
-
-    # Adaptive eps with minimum threshold to prevent DBSCAN from finding no clusters
-    eps1 = max(abs(Dis["conv1.weight"].item()), _DBSCAN_MIN_EPS)
-    eps3 = max(abs(Dis["fc.weight"].item()), _DBSCAN_MIN_EPS)
-    eps = max((eps1 ** 2 + eps3 ** 2) ** 0.5, 0.1)
-
     try:
-        db = DBSCAN(eps=eps, min_samples=2).fit(feature)
-        label_list = db.labels_
-        label_score = {}
-        for lbl in set(db.labels_):
-            if lbl == -1:
-                continue
-            pts = np.array([feature[c] for c in range(nc) if label_list[c] == lbl])
-            if len(pts) == 0:
-                continue
-            lm = pts.mean(axis=0)
-            cosin = _cos(lm, honest_std)
-            length = abs(np.sqrt(np.sum(lm * lm.T)) / honest_L2 - 1.0)
-            label_score[lbl] = alpha * cosin - (1 - alpha) * length
-
-        if label_score:
-            honest_label = sorted(label_score.items(), key=lambda x: x[1], reverse=True)[0][0]
-            malicious = [c for c in range(nc) if label_list[c] != honest_label]
-        else:
-            malicious = _cosine_fallback_detect(feature, honest_std, nc, alpha)
+        clf = IsolationForest(contamination=0.25, random_state=42)
+        predictions = clf.fit_predict(feature)
+        malicious = [c for c in range(nc) if predictions[c] == -1]
     except Exception:
-        malicious = _cosine_fallback_detect(feature, honest_std, nc, alpha)
+        malicious = []
 
     # ── Phase 2: Sign-flip detection (ensemble with VQC) ─────────────────────
     vqc_detected = list(malicious)

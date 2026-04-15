@@ -27,7 +27,7 @@ import torch
 import torch.nn.functional as F
 from torch import optim
 from torch.utils.data import DataLoader
-from sklearn.cluster import DBSCAN
+from sklearn.ensemble import IsolationForest
 
 # Ensure we can import from the 6.QBAD-FL directory itself
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -50,10 +50,6 @@ from metrics import (
 )
 
 # ── Helpers (mirror 6.QBAD-FL/main.py without global args) ───────────────────
-
-# Minimum per-axis epsilon for DBSCAN: prevents eps→0 when VQC converges
-# tightly on clean data (which would make all points become noise).
-_DBSCAN_MIN_EPS = 0.05
 
 # Fallback cosine-similarity detector: flag clients whose score is more than
 # this many standard deviations below the median.
@@ -82,7 +78,7 @@ def train_vqc(weight_train, dimen, dev):
     model = QuantumByzantineDetector(dimen)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     criterion = torch.nn.MSELoss(reduction="sum")
-    label = torch.tensor([[1.0]])
+    label = torch.ones((1, model.num_qubits * 3))
     for epoch in range(20):
         epoch_loss = 0.0
         for batch in loader:
@@ -232,76 +228,38 @@ def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev,
             k1[i] = W["module.conv1.weight"].data
             w3[i] = W["module.fc.weight"].data
 
-    feature = np.zeros([nc, 2])
-    feature[:, 0] = (
-        FC["conv1.weight"](k1.view(nc, -1)).cpu().detach().numpy().reshape(nc,)
-    )
-    feature[:, 1] = (
-        FC["fc.weight"](w3.view(nc, -1)).cpu().detach().numpy().reshape(nc,)
-    )
+    feature_conv1 = FC["conv1.weight"](k1.view(nc, -1)).cpu().detach().numpy()
+    feature_fc = FC["fc.weight"](w3.view(nc, -1)).cpu().detach().numpy()
+    if feature_conv1.ndim == 1:
+        feature_conv1 = feature_conv1.reshape(nc, 1)
+    if feature_fc.ndim == 1:
+        feature_fc = feature_fc.reshape(nc, 1)
+    feature = np.concatenate([feature_conv1, feature_fc], axis=1)
 
     if np.isnan(feature).any():
         print("  [Warning] NaN values detected in VQC features - replacing with column means")
         col_mean = np.nan_to_num(np.nanmean(feature, axis=0), nan=0.0)
         feature = np.where(np.isnan(feature), col_mean, feature)
 
-    honest_std = np.array([Std["conv1.weight"].item(), Std["fc.weight"].item()])
-    honest_L2 = np.sqrt(np.sum(honest_std * honest_std.T)) + 1e-9
-
-    # Adaptive eps: use the VQC output range on clean data, but enforce a
-    # minimum so that DBSCAN can always form clusters even when the VQC has
-    # converged tightly around 1.0.
-    eps1 = max(abs(Dis["conv1.weight"].item()), _DBSCAN_MIN_EPS)
-    eps3 = max(abs(Dis["fc.weight"].item()), _DBSCAN_MIN_EPS)
-    eps = max((eps1 ** 2 + eps3 ** 2) ** 0.5, 0.1)
-
-    print("  [Debug] VQC features (nc×2):\n    {}".format(
-        "\n    ".join(
-            "client{}: [{:.4f}, {:.4f}]".format(i, feature[i, 0], feature[i, 1])
-            for i in range(nc)
-        )
+    print("  [Debug] VQC features shape: {}".format(feature.shape))
+    print("    Min per dim: [{}]".format(
+        " ".join("{:.4f}".format(v) for v in feature.min(axis=0))
     ))
-    print("  [Debug] honest_std={}, eps={:.4f}".format(honest_std, eps))
+    print("    Max per dim: [{}]".format(
+        " ".join("{:.4f}".format(v) for v in feature.max(axis=0))
+    ))
 
-    # ── Primary detection: DBSCAN ─────────────────────────────────────────────
+    # ── Primary detection: Isolation Forest ───────────────────────────────────
     malicious = []
     try:
-        db = DBSCAN(eps=eps, min_samples=2).fit(feature)
-        label_list = db.labels_
-        print("  [Debug] DBSCAN labels: {}".format(label_list.tolist()))
-
-        label_mean, label_score = {}, {}
-        for lbl in set(db.labels_):
-            if lbl == -1:
-                continue
-            # Collect points for this cluster (reset temp per label)
-            pts = np.array([feature[c] for c in range(nc) if label_list[c] == lbl])
-            if len(pts) == 0:
-                continue
-            lm = pts.mean(axis=0)
-            label_mean[lbl] = lm
-            cosin = cos(lm, honest_std)
-            length = abs(
-                np.sqrt(np.sum(lm * lm.T)) / honest_L2 - 1.0
-            )
-            label_score[lbl] = cfg["alpha"] * cosin - (1 - cfg["alpha"]) * length
-
-        if label_score:
-            label_score_sorted = sorted(label_score.items(), key=lambda x: x[1], reverse=True)
-            honest_label = label_score_sorted[0][0]
-            print("  [Debug] honest_label={}, scores={}".format(
-                honest_label,
-                {k: "{:.4f}".format(v) for k, v in label_score.items()}
-            ))
-            malicious = [c for c in range(nc) if label_list[c] != honest_label]
-        else:
-            # All points are noise — fall back to cosine similarity
-            print("  [Warning] DBSCAN: no valid clusters (all noise), using fallback")
-            malicious = _cosine_fallback_detect(feature, honest_std, nc, cfg["alpha"])
-
+        clf = IsolationForest(contamination=0.25, random_state=42)
+        predictions = clf.fit_predict(feature)
+        malicious = [c for c in range(nc) if predictions[c] == -1]
+        print("  [Debug] Isolation Forest predictions: {}".format(predictions.tolist()))
+        print("  [VQC Detection] Detected {} anomalies: {}".format(len(malicious), malicious))
     except Exception as e:
-        print("  [Warning] DBSCAN failed ({}), using cosine fallback".format(e))
-        malicious = _cosine_fallback_detect(feature, honest_std, nc, cfg["alpha"])
+        print("  [Warning] Isolation Forest failed ({}), skipping VQC detection".format(e))
+        malicious = []
 
     # ── Phase 2: Sign-flip detection (ensemble with VQC) ─────────────────────
     vqc_detected = list(malicious)
