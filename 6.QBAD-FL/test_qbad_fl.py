@@ -58,6 +58,9 @@ _FALLBACK_THRESHOLD_STDEV = 1.5
 # Number of previous rounds of honest updates to retain for sign-flip detection.
 _HONEST_UPDATE_HISTORY_SIZE = 3
 
+# Default fraction of clients treated as anomalies by Isolation Forest.
+_IFOREST_CONTAMINATION = 0.25
+
 # Cosine-similarity threshold for sign-flip detection: updates whose cosine
 # similarity with the historical honest direction falls below this value are
 # flagged as sign-flip attackers.  Using cosine similarity (rather than raw
@@ -235,9 +238,17 @@ def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev,
     if feature_fc.ndim == 1:
         feature_fc = feature_fc.reshape(nc, 1)
     if feature_conv1.ndim != 2 or feature_conv1.shape[0] != nc:
-        raise ValueError("Unexpected conv1 VQC feature shape: {}".format(feature_conv1.shape))
+        raise ValueError(
+            "Unexpected conv1 VQC feature shape: {} (expected 2D with {} rows)".format(
+                feature_conv1.shape, nc
+            )
+        )
     if feature_fc.ndim != 2 or feature_fc.shape[0] != nc:
-        raise ValueError("Unexpected fc VQC feature shape: {}".format(feature_fc.shape))
+        raise ValueError(
+            "Unexpected fc VQC feature shape: {} (expected 2D with {} rows)".format(
+                feature_fc.shape, nc
+            )
+        )
     feature = np.concatenate([feature_conv1, feature_fc], axis=1)
 
     if np.isnan(feature).any():
@@ -255,7 +266,7 @@ def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev,
 
     # ── Primary detection: Isolation Forest ───────────────────────────────────
     malicious = []
-    contamination = cfg.get("iforest_contamination", 0.25)
+    contamination = cfg.get("iforest_contamination", _IFOREST_CONTAMINATION)
     try:
         clf = IsolationForest(contamination=contamination, random_state=42)
         predictions = clf.fit_predict(feature)
@@ -508,7 +519,7 @@ def _default_config():
         "central_data_size": 300,
         "central_data_pro": 0.1,
         "alpha": 0.5,
-        "iforest_contamination": 0.25,
+        "iforest_contamination": _IFOREST_CONTAMINATION,
     }
 
 

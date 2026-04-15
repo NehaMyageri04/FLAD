@@ -59,6 +59,9 @@ from metrics import (
 # Number of previous rounds of honest updates to retain for sign-flip detection.
 _HONEST_UPDATE_HISTORY_SIZE = 3
 
+# Default fraction of clients treated as anomalies by Isolation Forest.
+_IFOREST_CONTAMINATION = 0.25
+
 # Cosine-similarity threshold for sign-flip detection: updates whose cosine
 # similarity with the historical honest direction falls below this value are
 # flagged as sign-flip attackers.  Using cosine similarity (rather than raw
@@ -178,7 +181,7 @@ def _detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc):
 
 
 def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev,
-                iforest_contamination=0.25, honest_update_history=None):
+                iforest_contamination=_IFOREST_CONTAMINATION, honest_update_history=None):
     if data_name == "mnist":
         k1 = torch.zeros(nc, 10, 1, 5, 5).to(dev)
         w3 = torch.zeros(nc, 10, 320).to(dev)
@@ -199,9 +202,17 @@ def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev,
     if feature_fc.ndim == 1:
         feature_fc = feature_fc.reshape(nc, 1)
     if feature_conv1.ndim != 2 or feature_conv1.shape[0] != nc:
-        raise ValueError("Unexpected conv1 VQC feature shape: {}".format(feature_conv1.shape))
+        raise ValueError(
+            "Unexpected conv1 VQC feature shape: {} (expected 2D with {} rows)".format(
+                feature_conv1.shape, nc
+            )
+        )
     if feature_fc.ndim != 2 or feature_fc.shape[0] != nc:
-        raise ValueError("Unexpected fc VQC feature shape: {}".format(feature_fc.shape))
+        raise ValueError(
+            "Unexpected fc VQC feature shape: {} (expected 2D with {} rows)".format(
+                feature_fc.shape, nc
+            )
+        )
     feature = np.concatenate([feature_conv1, feature_fc], axis=1)
 
     if np.isnan(feature).any():
@@ -355,7 +366,7 @@ def run_single_experiment(cfg, verbose=True):
 
         detected = _vqc_detect(
             uploads, FC, Std, Dis, nc, cfg["data_name"], cfg["alpha"], dev,
-            cfg.get("iforest_contamination", 0.25), honest_update_history
+            cfg.get("iforest_contamination", _IFOREST_CONTAMINATION), honest_update_history
         )
         global_parameters = _fed_avg(list(uploads), detected)
 
@@ -523,7 +534,7 @@ def main():
         "central_data_size": 300,
         "central_data_pro": 0.1,
         "alpha": 0.5,
-        "iforest_contamination": 0.25,
+        "iforest_contamination": _IFOREST_CONTAMINATION,
     }
 
     total_start = time.time()
