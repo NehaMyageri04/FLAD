@@ -177,12 +177,12 @@ def _vqc_detect(Upload_Parameters, detector_conv1, detector_fc, nc, data_name, a
         else:
             k1[i] = W["module.conv1.weight"].data
             w3[i] = W["module.fc.weight"].data
-    print("    [VQC] Extracting quantum features (24-D per detector, 48-D total)...")
+    print("    [VQC] Extracting quantum features (27-D per detector, 54-D total)...")
     with torch.no_grad():
         feature_conv1 = detector_conv1(k1.view(nc, -1)).cpu().numpy()
         feature_fc = detector_fc(w3.view(nc, -1)).cpu().numpy()
-    expected_conv1_dim = detector_conv1.num_qubits * 3
-    expected_fc_dim = detector_fc.num_qubits * 3
+    expected_conv1_dim = detector_conv1.num_qubits * 3 + 3  # 24 angles + 3 norm stats
+    expected_fc_dim = detector_fc.num_qubits * 3 + 3        # 24 angles + 3 norm stats
     if feature_conv1.shape != (nc, expected_conv1_dim):
         raise ValueError(
             "Unexpected conv1 feature shape: {} (expected ({}, {}))".format(

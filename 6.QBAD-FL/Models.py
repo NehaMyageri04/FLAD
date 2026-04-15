@@ -221,7 +221,14 @@ class QuantumByzantineDetector(nn.Module):
     # ── Forward pass ──────────────────────────────────────────────────────────
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run each sample through the VQC and return a *(batch, 3*num_qubits)* tensor.
+        """Run each sample through the VQC and return a *(batch, 3*num_qubits+3)* tensor.
+
+        The output concatenates:
+        - 3*num_qubits angle features from the VQC (mapped to [0,1])
+        - 3 gradient-norm statistics (L2 norm, mean absolute value, std of
+          absolute values) that capture magnitude information lost by
+          angle-only normalisation.  These are scaled via tanh so they also
+          live in [0,1].
 
         Quantum circuits execute on CPU regardless of the caller's device; the
         method handles device transfers transparently.
@@ -242,5 +249,19 @@ class QuantumByzantineDetector(nn.Module):
         outputs = torch.stack(outputs, dim=0)          # (batch, 3*num_qubits)
         outputs = torch.nan_to_num(outputs, nan=0.5)   # replace NaN with neutral value
         outputs = ((1.0 + outputs) / 2.0)              # map [-1,1]→[0,1]
+        outputs = outputs ** 2
 
-        return outputs ** 2
+        # ── Gradient-norm features (3-D) ──────────────────────────────────────
+        # These capture magnitude information that is lost when the VQC only
+        # encodes normalised (directional) features.  MPAF scales gradient
+        # magnitudes to avoid detection, so including raw magnitude statistics
+        # allows the Isolation Forest to distinguish scaled byzantine updates.
+        x_abs = x.abs()
+        x_norm = torch.norm(x, dim=1, keepdim=True)          # (batch, 1) L2 norm
+        x_mean = x_abs.mean(dim=1, keepdim=True)             # (batch, 1) mean |grad|
+        x_std  = x_abs.std(dim=1, keepdim=True)              # (batch, 1) std  |grad|
+        norm_features = torch.cat([x_norm, x_mean, x_std], dim=1)  # (batch, 3)
+        # Map to [0, 1] via tanh→rescale so the scale is consistent with VQC outputs
+        norm_features = (1.0 + torch.tanh(norm_features)) / 2.0
+
+        return torch.cat([outputs, norm_features], dim=1)    # (batch, 3*num_qubits+3)
