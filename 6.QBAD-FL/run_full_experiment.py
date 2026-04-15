@@ -198,6 +198,10 @@ def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev,
         feature_conv1 = feature_conv1.reshape(nc, 1)
     if feature_fc.ndim == 1:
         feature_fc = feature_fc.reshape(nc, 1)
+    if feature_conv1.ndim != 2 or feature_conv1.shape[0] != nc:
+        raise ValueError("Unexpected conv1 VQC feature shape: {}".format(feature_conv1.shape))
+    if feature_fc.ndim != 2 or feature_fc.shape[0] != nc:
+        raise ValueError("Unexpected fc VQC feature shape: {}".format(feature_fc.shape))
     feature = np.concatenate([feature_conv1, feature_fc], axis=1)
 
     if np.isnan(feature).any():
