@@ -208,7 +208,8 @@ def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev,
         clf = IsolationForest(contamination=0.25, random_state=42)
         predictions = clf.fit_predict(feature)
         malicious = [c for c in range(nc) if predictions[c] == -1]
-    except Exception:
+    except Exception as e:
+        print("    [Warning] Isolation Forest failed ({}), skipping VQC detection".format(e))
         malicious = []
 
     # ── Phase 2: Sign-flip detection (ensemble with VQC) ─────────────────────
