@@ -213,8 +213,12 @@ def _vqc_detect(Upload_Parameters, FC, Std, Dis, nc, data_name, alpha, dev,
         predictions = clf.fit_predict(feature)
         malicious = [c for c in range(nc) if predictions[c] == -1]
     except Exception as e:
-        print("    [Warning] Isolation Forest failed ({}), skipping VQC detection".format(e))
-        malicious = []
+        print("    [Warning] Isolation Forest failed ({}), using cosine fallback".format(e))
+        honest_std = np.concatenate([
+            Std["conv1.weight"].detach().cpu().numpy().reshape(-1),
+            Std["fc.weight"].detach().cpu().numpy().reshape(-1),
+        ])
+        malicious = _cosine_fallback_detect(feature, honest_std, nc, alpha)
 
     # ── Phase 2: Sign-flip detection (ensemble with VQC) ─────────────────────
     vqc_detected = list(malicious)

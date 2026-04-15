@@ -262,8 +262,12 @@ def vqc_feature_extraction(Upload_Parameters, FC, Std, Dis, cfg, dev,
         print("  [Debug] Isolation Forest predictions: {}".format(predictions.tolist()))
         print("  [VQC Detection] Detected {} anomalies: {}".format(len(malicious), malicious))
     except Exception as e:
-        print("  [Warning] Isolation Forest failed ({}), skipping VQC detection".format(e))
-        malicious = []
+        print("  [Warning] Isolation Forest failed ({}), using cosine fallback".format(e))
+        honest_std = np.concatenate([
+            Std["conv1.weight"].detach().cpu().numpy().reshape(-1),
+            Std["fc.weight"].detach().cpu().numpy().reshape(-1),
+        ])
+        malicious = _cosine_fallback_detect(feature, honest_std, nc, cfg["alpha"])
 
     # ── Phase 2: Sign-flip detection (ensemble with VQC) ─────────────────────
     vqc_detected = list(malicious)
