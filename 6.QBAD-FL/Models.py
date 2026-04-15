@@ -235,7 +235,7 @@ class QuantumByzantineDetector(nn.Module):
         # Process one sample at a time (quantum circuit is inherently sequential)
         outputs = []
         for i in range(encoded.size(0)):
-            out = self.qlayer(encoded[i])  # scalar tensor
+            out = self.qlayer(encoded[i])  # (3*num_qubits,) tensor
             outputs.append(out)
 
         outputs = torch.stack(outputs, dim=0)          # (batch, 3*num_qubits)
