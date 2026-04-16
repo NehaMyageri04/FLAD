@@ -272,6 +272,59 @@ def vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, 
     return malicious
 
 
+def detect_norm_outliers(Upload_Parameters, cfg, dev):
+    """Reject updates with anomalous gradient norms before VQC detection."""
+    del dev  # Unused, kept for signature consistency with detector calls.
+    nc = cfg["num_of_clients"]
+    norms = [torch.norm(torch.cat([u[k].flatten() for k in sorted(u.keys())])).item()
+             for u in Upload_Parameters]
+
+    honest_norms = norms[:nc - cfg["byzantine_size"]]
+    if not honest_norms:
+        return []
+
+    median_norm = np.median(honest_norms)
+    threshold = median_norm * 10
+    norm_rejected = [i for i in range(nc) if norms[i] > threshold]
+
+    if norm_rejected:
+        print("  [Norm Filter] Median honest norm: {:.4f}, Threshold: {:.4f}".format(
+            median_norm, threshold
+        ))
+        print("  [Norm Filter] Rejected {} outliers: {}".format(
+            len(norm_rejected), norm_rejected
+        ))
+
+    return norm_rejected
+
+
+def clip_gradient_norms(Upload_Parameters, cfg):
+    """Clip oversized update norms to prevent poisoned norm explosion."""
+    nc = cfg["num_of_clients"]
+    norms = [torch.norm(torch.cat([u[k].flatten() for k in sorted(u.keys())])).item()
+             for u in Upload_Parameters]
+
+    honest_norms = norms[:nc - cfg["byzantine_size"]]
+    if not honest_norms:
+        return
+
+    median_norm = np.median(honest_norms)
+    max_allowed = median_norm * 10
+
+    clipped_count = 0
+    for i, update in enumerate(Upload_Parameters):
+        if norms[i] > max_allowed:
+            scale = max_allowed / norms[i]
+            for k in update:
+                update[k] = update[k] * scale
+            clipped_count += 1
+
+    if clipped_count > 0:
+        print("  [Gradient Clipping] Clipped {} updates to max norm {:.4f}".format(
+            clipped_count, max_allowed
+        ))
+
+
 def fed_avg(Upload_Parameters, malicious):
     params = list(Upload_Parameters)
     for j, idx in enumerate(sorted(malicious)):
@@ -412,8 +465,19 @@ def run_experiment(cfg, verbose=True):
 
         Upload_Parameters.extend(byz_uploads)
 
-        detected = vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, dev,
-                                          honest_update_history)
+        # ── Stage 1: Norm-based pre-filter (magnitude outliers) ─────────────────
+        norm_rejected = detect_norm_outliers(Upload_Parameters, cfg, dev)
+        print(f"  [Norm Filter] Rejected: {norm_rejected}")
+
+        # ── Stage 2: VQC + sign-flip detection (direction anomalies) ───────────
+        vqc_detected = vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, dev,
+                                              honest_update_history)
+
+        # ── Stage 3: Ensemble both detectors ────────────────────────────────────
+        detected = list(set(norm_rejected) | set(vqc_detected))
+        print("  [Ensemble] Norm filter={} + VQC={} → Final={}: {}".format(
+            len(norm_rejected), len(vqc_detected), len(detected), sorted(detected)
+        ))
 
         # DEBUG: Print gradient norms for all clients
         print("\n  [DEBUG] Gradient Norms Analysis:")
@@ -441,6 +505,10 @@ def run_experiment(cfg, verbose=True):
         else:
             print("    Byz norms   - N/A (no Byzantine clients)")
 
+        # ── Stage 4: Clip remaining outliers before aggregation ─────────────────
+        clip_gradient_norms(Upload_Parameters, cfg)
+
+        # ── Stage 5: Federated averaging ────────────────────────────────────────
         global_parameters = fed_avg(list(Upload_Parameters), detected)
 
         # Evaluate model
