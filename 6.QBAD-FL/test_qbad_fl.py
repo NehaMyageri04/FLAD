@@ -424,16 +424,22 @@ def run_experiment(cfg, verbose=True):
         for i, n in enumerate(norms):
             is_byz = " ← BYZANTINE" if i >= honest_end else ""
             print(f"    Client {i:2d}: norm={n:.4f}{is_byz}")
-        print(
-            "    Honest norms - Median: {:.4f}, Mean: {:.4f}, Std: {:.4f}".format(
-                np.median(norms[:honest_end]), np.mean(norms[:honest_end]), np.std(norms[:honest_end])
+        if honest_end > 0:
+            print(
+                "    Honest norms - Median: {:.4f}, Mean: {:.4f}, Std: {:.4f}".format(
+                    np.median(norms[:honest_end]), np.mean(norms[:honest_end]), np.std(norms[:honest_end])
+                )
             )
-        )
-        print(
-            "    Byz norms   - Median: {:.4f}, Mean: {:.4f}, Std: {:.4f}".format(
-                np.median(norms[honest_end:]), np.mean(norms[honest_end:]), np.std(norms[honest_end:])
+        else:
+            print("    Honest norms - N/A (no honest clients)")
+        if byz > 0:
+            print(
+                "    Byz norms   - Median: {:.4f}, Mean: {:.4f}, Std: {:.4f}".format(
+                    np.median(norms[honest_end:]), np.mean(norms[honest_end:]), np.std(norms[honest_end:])
+                )
             )
-        )
+        else:
+            print("    Byz norms   - N/A (no Byzantine clients)")
 
         global_parameters = fed_avg(list(Upload_Parameters), detected)
 
