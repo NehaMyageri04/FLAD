@@ -415,6 +415,26 @@ def run_experiment(cfg, verbose=True):
         detected = vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, dev,
                                           honest_update_history)
 
+        # DEBUG: Print gradient norms for all clients
+        print("\n  [DEBUG] Gradient Norms Analysis:")
+        norms = [torch.norm(torch.cat([u[k].flatten() for k in sorted(u.keys())])).item()
+                 for u in Upload_Parameters]
+        byz = cfg["byzantine_size"]
+        honest_end = nc - byz
+        for i, n in enumerate(norms):
+            is_byz = " ← BYZANTINE" if i >= honest_end else ""
+            print(f"    Client {i:2d}: norm={n:.4f}{is_byz}")
+        print(
+            "    Honest norms - Median: {:.4f}, Mean: {:.4f}, Std: {:.4f}".format(
+                np.median(norms[:honest_end]), np.mean(norms[:honest_end]), np.std(norms[:honest_end])
+            )
+        )
+        print(
+            "    Byz norms   - Median: {:.4f}, Mean: {:.4f}, Std: {:.4f}".format(
+                np.median(norms[honest_end:]), np.mean(norms[honest_end:]), np.std(norms[honest_end:])
+            )
+        )
+
         global_parameters = fed_avg(list(Upload_Parameters), detected)
 
         # Evaluate model
