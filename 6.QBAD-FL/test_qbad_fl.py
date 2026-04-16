@@ -70,6 +70,9 @@ _FEATURE_NAN_FALLBACK = 0.5
 # dot product) makes the detector scale-invariant.
 _SIGN_FLIP_COSINE_THRESHOLD = -0.5
 
+# Norm outlier multiplier used by both norm rejection and clipping.
+_NORM_OUTLIER_MULTIPLIER = 10
+
 
 def cos(a, b):
     return np.sum(a * b.T) / (
@@ -273,8 +276,10 @@ def vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, 
 
 
 def detect_norm_outliers(Upload_Parameters, cfg, dev):
-    """Reject updates with anomalous gradient norms before VQC detection."""
-    del dev  # Unused, kept for signature consistency with detector calls.
+    """Reject updates with anomalous gradient norms before VQC detection.
+
+    `dev` is kept for call-site consistency with detector-stage functions.
+    """
     nc = cfg["num_of_clients"]
     norms = [torch.norm(torch.cat([u[k].flatten() for k in sorted(u.keys())])).item()
              for u in Upload_Parameters]
@@ -284,15 +289,12 @@ def detect_norm_outliers(Upload_Parameters, cfg, dev):
         return []
 
     median_norm = np.median(honest_norms)
-    threshold = median_norm * 10
+    threshold = median_norm * _NORM_OUTLIER_MULTIPLIER
     norm_rejected = [i for i in range(nc) if norms[i] > threshold]
 
     if norm_rejected:
         print("  [Norm Filter] Median honest norm: {:.4f}, Threshold: {:.4f}".format(
             median_norm, threshold
-        ))
-        print("  [Norm Filter] Rejected {} outliers: {}".format(
-            len(norm_rejected), norm_rejected
         ))
 
     return norm_rejected
@@ -309,7 +311,7 @@ def clip_gradient_norms(Upload_Parameters, cfg):
         return
 
     median_norm = np.median(honest_norms)
-    max_allowed = median_norm * 10
+    max_allowed = median_norm * _NORM_OUTLIER_MULTIPLIER
 
     clipped_count = 0
     for i, update in enumerate(Upload_Parameters):
