@@ -73,6 +73,9 @@ _SIGN_FLIP_COSINE_THRESHOLD = -0.5
 # Norm outlier multiplier used by both norm rejection and clipping.
 _NORM_OUTLIER_MULTIPLIER = 10
 
+# Minimum fraction of best accuracy before checkpoint recovery is triggered.
+_CHECKPOINT_RECOVERY_THRESHOLD = 0.7
+
 
 def cos(a, b):
     return np.sum(a * b.T) / (
@@ -418,6 +421,8 @@ def run_experiment(cfg, verbose=True):
     round_results = []
     start = time.time()
     honest_update_history = []
+    best_accuracy = 0.0
+    best_model_state = copy.deepcopy(net.state_dict())
 
     for rnd in range(cfg["num_comm"]):
         rnd_start = time.time()
@@ -524,6 +529,11 @@ def run_experiment(cfg, verbose=True):
                 num_batches += 1
 
         acc = float(sum_accu / num_batches)
+
+        if acc > best_accuracy:
+            best_accuracy = acc
+            best_model_state = copy.deepcopy(net.state_dict())
+
         dr = calculate_detection_rate(detected, actual_malicious_indices)
         fpr = calculate_false_positive_rate(detected, actual_malicious_indices, nc)
         prec = calculate_precision(detected, actual_malicious_indices)
@@ -554,6 +564,15 @@ def run_experiment(cfg, verbose=True):
             )
             print("  Detected malicious: {}".format(detected))
             print("  Actual  malicious : {}".format(actual_malicious_indices))
+
+        if best_accuracy > 0 and acc < best_accuracy * _CHECKPOINT_RECOVERY_THRESHOLD:
+            print(
+                "  [Recovery] Accuracy dropped to {:.2%}, restoring best checkpoint ({:.2%})".format(
+                    acc, best_accuracy
+                )
+            )
+            net.load_state_dict(best_model_state)
+            global_parameters = {k: v.clone() for k, v in best_model_state.items()}
 
     total_time = time.time() - start
     summary = aggregate_round_metrics(round_results)
