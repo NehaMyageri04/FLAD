@@ -565,7 +565,7 @@ def run_experiment(cfg, verbose=True):
             print("  Detected malicious: {}".format(detected))
             print("  Actual  malicious : {}".format(actual_malicious_indices))
 
-        if best_accuracy > 0 and accuracy < best_accuracy * 0.7:
+        if best_accuracy > 0 and accuracy < best_accuracy * _CHECKPOINT_RECOVERY_THRESHOLD:
             print(
                 "  [Recovery] Accuracy dropped to {:.2%}, restoring best checkpoint ({:.2%})".format(
                     accuracy, best_accuracy
