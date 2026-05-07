@@ -528,10 +528,10 @@ def run_experiment(cfg, verbose=True):
                 sum_accu += (preds == label).float().mean()
                 num_batches += 1
 
-        acc = float(sum_accu / num_batches)
+        accuracy = float(sum_accu / num_batches)
 
-        if acc > best_accuracy:
-            best_accuracy = acc
+        if accuracy > best_accuracy:
+            best_accuracy = accuracy
             best_model_state = copy.deepcopy(net.state_dict())
 
         dr = calculate_detection_rate(detected, actual_malicious_indices)
@@ -543,7 +543,7 @@ def run_experiment(cfg, verbose=True):
 
         rnd_result = {
             "round": rnd + 1,
-            "accuracy": acc,
+            "accuracy": accuracy,
             "detection_rate": dr,
             "false_positive_rate": fpr,
             "precision": prec,
@@ -559,16 +559,16 @@ def run_experiment(cfg, verbose=True):
             print(
                 "  accuracy={:.2%}  detection_rate={:.2%}  "
                 "FPR={:.2%}  F1={:.4f}  time={:.1f}s".format(
-                    acc, dr, fpr, f1, rnd_time
+                    accuracy, dr, fpr, f1, rnd_time
                 )
             )
             print("  Detected malicious: {}".format(detected))
             print("  Actual  malicious : {}".format(actual_malicious_indices))
 
-        if best_accuracy > 0 and acc < best_accuracy * _CHECKPOINT_RECOVERY_THRESHOLD:
+        if best_accuracy > 0 and accuracy < best_accuracy * 0.7:
             print(
                 "  [Recovery] Accuracy dropped to {:.2%}, restoring best checkpoint ({:.2%})".format(
-                    acc, best_accuracy
+                    accuracy, best_accuracy
                 )
             )
             net.load_state_dict(best_model_state)
