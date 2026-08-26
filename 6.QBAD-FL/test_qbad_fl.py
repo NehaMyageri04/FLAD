@@ -54,9 +54,6 @@ from metrics import (
 # this many standard deviations below the median.
 _FALLBACK_THRESHOLD_STDEV = 1.5
 
-# Number of previous rounds of honest updates to retain for sign-flip detection.
-_HONEST_UPDATE_HISTORY_SIZE = 3
-
 # Default fraction of clients treated as anomalies by Isolation Forest.
 _IFOREST_CONTAMINATION = 0.25
 # Fixed Isolation Forest ensemble size.
@@ -151,56 +148,82 @@ def _cosine_fallback_detect(feature, honest_std, nc, alpha=0.5):
     return malicious
 
 
-def detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc):
-    """Detect sign-flip attacks by checking gradient direction correlation.
+def detect_sign_flip_attacks(Upload_Parameters, nc):
+    """Detect sign-flip anomalies using only the current submitted updates.
 
-    Sign-flipped updates have a consistently negative dot product with the
-    historical honest update direction.  At least two rounds of history are
-    required for a reliable reference direction.
+    IMPORTANT:
+    This detector must not use ground-truth honest-client identities, a
+    preselected honest subset, Byzantine labels, or a history constructed
+    from known-honest clients.
+
+    The reference direction is estimated robustly from the current client
+    submissions themselves. With a majority of honest clients, the geometric
+    median of the client update directions provides a label-independent
+    reference direction.
 
     Parameters
     ----------
-    Upload_Parameters    : list of state-dict-like dicts, one per client.
-    honest_update_history: list of averaged honest update dicts from past rounds.
-    nc                   : total number of clients.
+    Upload_Parameters : list of state-dict-like dicts, one per client.
+    nc                : total number of clients.
 
     Returns
     -------
-    list of int — indices of clients detected as sign-flip attackers.
+    list of int
+        Indices of clients whose update direction is strongly opposed to the
+        robust current-round reference direction.
     """
-    if not honest_update_history:
-        return []  # Need a non-empty update history for a reliable reference
+    if not Upload_Parameters:
+        return []
 
-    # Compute the average honest gradient direction over all stored rounds
-    all_flats = [
-        torch.cat([h[k].flatten() for k in sorted(h.keys())])
-        for h in honest_update_history
-    ]
-    avg_honest_flat = torch.stack(all_flats).mean(dim=0)
-    avg_honest_norm = torch.norm(avg_honest_flat).item() + 1e-9
+    # Flatten each submitted update and normalize it to a direction.
+    directions = []
+    for update in Upload_Parameters:
+        flat = torch.cat([update[k].flatten() for k in sorted(update.keys())]).detach()
+        norm = torch.norm(flat).item()
+        if norm <= 1e-12:
+            directions.append(np.zeros_like(flat.cpu().numpy(), dtype=np.float64))
+        else:
+            directions.append((flat / norm).cpu().numpy().astype(np.float64))
+
+    directions = np.stack(directions, axis=0)
+
+    # Coordinate-wise median gives a robust, label-independent reference.
+    # It uses the current population only; no honest/Byzantine identities
+    # are supplied to the detector.
+    reference = np.median(directions, axis=0)
+    reference_norm = float(np.linalg.norm(reference))
+
+    if reference_norm <= 1e-12:
+        return []
+
+    reference = reference / reference_norm
 
     detected = []
-    for c, client_update in enumerate(Upload_Parameters):
-        client_flat = torch.cat([client_update[k].flatten()
-                                 for k in sorted(client_update.keys())])
-        client_norm = torch.norm(client_flat).item() + 1e-9
-        dot_prod = torch.dot(avg_honest_flat, client_flat).item()
-        # Use cosine similarity (scale-invariant) to detect sign-flipped updates
-        cosine_sim = dot_prod / (avg_honest_norm * client_norm)
+    for c in range(min(nc, len(directions))):
+        cosine_sim = float(np.dot(reference, directions[c]))
+
         if cosine_sim < _SIGN_FLIP_COSINE_THRESHOLD:
             detected.append(c)
-            print("  [Sign-Flip Detection] Client {} cosine_sim={:.4f} → FLAGGED".format(
-                c, cosine_sim))
+            print(
+                "  [Sign-Flip Detection] Client {} cosine_sim={:.4f} → FLAGGED".format(
+                    c, cosine_sim
+                )
+            )
 
     if detected:
-        print("  [Sign-Flip Detection] Detected {} flip attacks: {}".format(
-            len(detected), detected))
+        print(
+            "  [Sign-Flip Detection] Detected {} flip anomalies: {}".format(
+                len(detected), detected
+            )
+        )
+
     return detected
 
 
-def vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, dev,
-                            honest_update_history=None):
-    """Extract quantum features and detect anomalies via Isolation Forest."""
+def vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, dev):
+    """Extract quantum features and detect anomalies via Isolation Forest
+    plus a label-independent current-round sign-flip detector.
+    """
     nc = cfg["num_of_clients"]
     if cfg["data_name"] == "mnist":
         k1 = torch.zeros(nc, 10, 1, 5, 5).to(dev)
@@ -266,8 +289,9 @@ def vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, 
     # ── Phase 2: Sign-flip detection (ensemble with VQC) ─────────────────────
     vqc_detected = list(malicious)
     flip_detected = []
-    if honest_update_history is not None and len(honest_update_history) >= 1:
-        flip_detected = detect_sign_flip_attacks(Upload_Parameters, honest_update_history, nc)
+    # Label-independent sign-flip detection:
+    # reference is estimated from the current submitted population only.
+    flip_detected = detect_sign_flip_attacks(Upload_Parameters, nc)
 
     # ── Ensemble: merge VQC + sign-flip results ───────────────────────────────
     malicious = list(set(vqc_detected) | set(flip_detected))
@@ -444,7 +468,6 @@ def run_experiment(cfg, verbose=True):
 
     round_results = []
     start = time.time()
-    honest_update_history = []
     best_accuracy = 0.0
     best_model_state = copy.deepcopy(net.state_dict())
 
@@ -481,19 +504,14 @@ def run_experiment(cfg, verbose=True):
             data_name=cfg["data_name"]
         )
 
-        # Track average honest update for sign-flip detection history.
-        # At this point Upload_Parameters contains only honest client uploads
-        # (Byzantine uploads are not yet appended below via .extend).
-        if Upload_Parameters:
-            avg_honest = {}
-            for k in Upload_Parameters[0]:
-                avg_honest[k] = torch.stack(
-                    [u[k].clone() for u in Upload_Parameters]
-                ).mean(dim=0)
-            honest_update_history.append(avg_honest)
-            if len(honest_update_history) > _HONEST_UPDATE_HISTORY_SIZE:
-                honest_update_history.pop(0)
-
+        # IMPORTANT:
+        # Do not construct an "honest update history" here. That history was
+        # previously built from known honest clients before Byzantine uploads
+        # were appended, which leaked ground-truth client identities into the
+        # sign-flip detector.
+        #
+        # All detector references must be derived only after the complete
+        # submitted client population is available.
         Upload_Parameters.extend(byz_uploads)
 
         # ── Stage 1: Norm-based pre-filter (magnitude outliers) ─────────────────
@@ -502,8 +520,9 @@ def run_experiment(cfg, verbose=True):
         print(f"  [Norm Filter] Rejected: {norm_rejected}")
 
         # ── Stage 2: VQC + sign-flip detection (direction anomalies) ───────────
-        vqc_detected = vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, dev,
-                                              honest_update_history)
+        vqc_detected = vqc_feature_extraction(
+            Upload_Parameters, detector_conv1, detector_fc, cfg, dev
+        )
 
         # ── Stage 3: Ensemble both detectors ────────────────────────────────────
         detected = list(set(norm_rejected) | set(vqc_detected))
