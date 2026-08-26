@@ -279,41 +279,63 @@ def vqc_feature_extraction(Upload_Parameters, detector_conv1, detector_fc, cfg, 
 
 
 def detect_norm_outliers(Upload_Parameters, cfg, dev):
-    """Reject updates with anomalous gradient norms before VQC detection.
+    """Reject anomalous update norms using a label-independent reference.
 
-    `dev` is kept for call-site consistency with detector-stage functions.
+    IMPORTANT:
+    The threshold is calibrated from the norms of ALL submitted client
+    updates. It does not use `byzantine_size`, known Byzantine indices, or
+    any attack labels to identify a presumed-honest subset.
+
+    This keeps the norm filter usable as an unsupervised server-side
+    pre-filter during an FL round.
     """
-    nc = cfg["num_of_clients"]
-    norms = [torch.norm(torch.cat([u[k].flatten() for k in sorted(u.keys())])).item()
-             for u in Upload_Parameters]
+    norms = [
+        torch.norm(
+            torch.cat([u[k].flatten() for k in sorted(u.keys())])
+        ).item()
+        for u in Upload_Parameters
+    ]
 
-    honest_norms = norms[:nc - cfg["byzantine_size"]]
-    if not honest_norms:
+    if not norms:
         return []
 
-    median_norm = np.median(honest_norms)
+    # Robust location estimate from the complete submitted population.
+    # No ground-truth client labels are used here.
+    median_norm = float(np.median(norms))
     threshold = median_norm * _NORM_OUTLIER_MULTIPLIER
-    norm_rejected = [i for i in range(nc) if norms[i] > threshold]
+
+    norm_rejected = [
+        i for i, norm in enumerate(norms)
+        if norm > threshold
+    ]
 
     if norm_rejected:
-        print("  [Norm Filter] Median honest norm: {:.4f}, Threshold: {:.4f}".format(
-            median_norm, threshold
-        ))
+        print(
+            "  [Norm Filter] Population median norm: {:.4f}, "
+            "Threshold: {:.4f}".format(median_norm, threshold)
+        )
 
     return norm_rejected
 
 
 def clip_gradient_norms(Upload_Parameters, cfg):
-    """Clip oversized update norms to prevent poisoned norm explosion."""
-    nc = cfg["num_of_clients"]
-    norms = [torch.norm(torch.cat([u[k].flatten() for k in sorted(u.keys())])).item()
-             for u in Upload_Parameters]
+    """Clip oversized updates using a label-independent norm threshold.
 
-    honest_norms = norms[:nc - cfg["byzantine_size"]]
-    if not honest_norms:
+    The clipping threshold is computed from ALL submitted updates and does
+    not use the known Byzantine-client count or ground-truth labels.
+    """
+    norms = [
+        torch.norm(
+            torch.cat([u[k].flatten() for k in sorted(u.keys())])
+        ).item()
+        for u in Upload_Parameters
+    ]
+
+    if not norms:
         return
 
-    median_norm = np.median(honest_norms)
+    # Use the same label-independent reference as the norm rejection stage.
+    median_norm = float(np.median(norms))
     max_allowed = median_norm * _NORM_OUTLIER_MULTIPLIER
 
     clipped_count = 0
@@ -325,9 +347,11 @@ def clip_gradient_norms(Upload_Parameters, cfg):
             clipped_count += 1
 
     if clipped_count > 0:
-        print("  [Gradient Clipping] Clipped {} updates to max norm {:.4f}".format(
-            clipped_count, max_allowed
-        ))
+        print(
+            "  [Gradient Clipping] Clipped {} updates to max norm {:.4f}".format(
+                clipped_count, max_allowed
+            )
+        )
 
 
 def fed_avg(Upload_Parameters, malicious):
@@ -473,6 +497,7 @@ def run_experiment(cfg, verbose=True):
         Upload_Parameters.extend(byz_uploads)
 
         # ── Stage 1: Norm-based pre-filter (magnitude outliers) ─────────────────
+        # Label-independent: threshold is derived only from submitted updates.
         norm_rejected = detect_norm_outliers(Upload_Parameters, cfg, dev)
         print(f"  [Norm Filter] Rejected: {norm_rejected}")
 
@@ -486,7 +511,10 @@ def run_experiment(cfg, verbose=True):
             len(norm_rejected), len(vqc_detected), len(detected), sorted(detected)
         ))
 
-        # DEBUG: Print gradient norms for all clients
+        # DEBUG / EVALUATION ONLY:
+        # Ground-truth Byzantine indices are used below only to inspect and
+        # report experiment outcomes. They must not influence detection,
+        # threshold calibration, clipping, or aggregation decisions.
         print("\n  [DEBUG] Gradient Norms Analysis:")
         norms = [torch.norm(torch.cat([u[k].flatten() for k in sorted(u.keys())])).item()
                  for u in Upload_Parameters]
