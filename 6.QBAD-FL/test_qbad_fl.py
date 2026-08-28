@@ -836,6 +836,9 @@ def collect_attack_updates(
 _RECOVERY_ENABLED = True
 _RECOVERY_NORM_RATIO = 10.0
 _RECOVERY_DRIFT_RATIO = 5.0
+# Absolute ceiling multiplier for the last stable server model.
+# This is server-side structural monitoring only; it never uses test/validation data.
+_RECOVERY_MAX_NORM_MULTIPLIER = 10.0
 _RECOVERY_EPS = 1e-12
 
 
