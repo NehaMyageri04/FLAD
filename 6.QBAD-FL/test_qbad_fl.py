@@ -875,48 +875,90 @@ def _state_dict_drift(current_state, previous_state):
     return float(np.sqrt(max(total_sq, 0.0)))
 
 
-def assess_server_model_health(current_state, previous_state, initial_norm):
-    """Check only server-observable structural properties of a global model.
+def assess_server_model_health(
+    current_state,
+    previous_state,
+    previous_stable_state,
+):
+    """Check server-observable structural properties of a candidate model.
 
-    No labels, client identities, test samples, predictions, or detection
-    metrics are consulted. Thresholds are fixed constants defined before the
-    experiment and scaled only by the initial server model norm.
+    This function deliberately does NOT inspect:
+        - test data
+        - validation data
+        - labels
+        - accuracy
+        - predictions
+        - Byzantine identities
+        - attack labels
+        - detection metrics
 
-    Returns
-    -------
-    dict
-        Contains parameter norm, drift, thresholds, and a boolean ``healthy``.
+    It compares the candidate only with previously accepted server models.
     """
-    param_norm = _state_dict_parameter_norm(current_state)
-    drift = _state_dict_drift(current_state, previous_state)
 
-    base_norm = max(float(initial_norm), _RECOVERY_EPS)
-    max_param_norm = base_norm * _RECOVERY_PARAM_NORM_RATIO
-    max_drift = base_norm * _RECOVERY_DRIFT_RATIO
+    current_norm = _state_dict_parameter_norm(current_state)
+    previous_norm = _state_dict_parameter_norm(previous_state)
+    stable_norm = _state_dict_parameter_norm(previous_stable_state)
 
-    nonfinite = not np.isfinite(param_norm) or not np.isfinite(drift)
-    norm_explosion = param_norm > max_param_norm
-    excessive_drift = drift > max_drift
+    drift = _state_dict_drift(
+        current_state,
+        previous_stable_state,
+    )
 
-    healthy = not (nonfinite or norm_explosion or excessive_drift)
+    base_norm = max(
+        previous_norm,
+        stable_norm,
+        _RECOVERY_EPS,
+    )
+
+    norm_threshold = base_norm * _RECOVERY_NORM_RATIO
+    drift_threshold = base_norm * _RECOVERY_DRIFT_RATIO
+
+    # Absolute safety ceiling relative to the last stable model.
+    stable_ceiling = (
+        max(stable_norm, _RECOVERY_EPS)
+        * _RECOVERY_MAX_NORM_MULTIPLIER
+    )
+
+    nonfinite = (
+        not np.isfinite(current_norm)
+        or not np.isfinite(drift)
+    )
+
+    norm_explosion = (
+        current_norm > norm_threshold
+        or current_norm > stable_ceiling
+    )
+
+    excessive_drift = drift > drift_threshold
+
+    healthy = not (
+        nonfinite
+        or norm_explosion
+        or excessive_drift
+    )
 
     reasons = []
+
     if nonfinite:
         reasons.append("non-finite parameters")
+
     if norm_explosion:
-        reasons.append("parameter-norm explosion")
+        reasons.append("structural parameter-norm explosion")
+
     if excessive_drift:
-        reasons.append("excessive round-to-round drift")
+        reasons.append("excessive round-to-round parameter drift")
 
     return {
         "healthy": healthy,
-        "parameter_norm": param_norm,
-        "parameter_norm_threshold": max_param_norm,
+        "parameter_norm": current_norm,
+        "previous_norm": previous_norm,
+        "stable_norm": stable_norm,
+        "parameter_norm_threshold": norm_threshold,
+        "absolute_norm_ceiling": stable_ceiling,
         "parameter_drift": drift,
-        "drift_threshold": max_drift,
+        "drift_threshold": drift_threshold,
         "recovery_reasons": reasons,
     }
-
 
 # ── Main experiment runner ─────────────────────────────────────────────────────
 
@@ -1012,12 +1054,12 @@ def run_experiment(
     }
 
     # ── Server-side checkpoint baseline ──────────────────────────────────────
-    # The checkpoint is created from the initial global model before any
-    # client update is observed. Recovery thresholds are structural constants;
-    # they never depend on test accuracy, attack labels, or detector metrics.
+    # The initial model is only the first stable checkpoint.
+    # Recovery thereafter uses the most recently accepted server model.
+    # No test/validation information is involved.
     initial_model_state = _clone_state_dict(global_parameters)
     previous_stable_state = _clone_state_dict(global_parameters)
-    initial_parameter_norm = _state_dict_parameter_norm(initial_model_state)
+    previous_server_state = _clone_state_dict(global_parameters)
 
     recovery_count = 0
 
@@ -1282,48 +1324,90 @@ def run_experiment(
         )
 
         # ── Stage 6: Server-side structural health / checkpoint recovery ─────
-        # IMPORTANT: this stage sees ONLY the candidate global model and the
-        # previous accepted server model. It does NOT see test data, test
-        # accuracy, Byzantine identities/counts, attack labels, or detection
-        # metrics. Recovery is therefore independent of the evaluation set.
+        #
+        # IMPORTANT:
+        # This stage sees ONLY the candidate global model and previously
+        # accepted server models. It does NOT see test/validation data,
+        # accuracy, labels, Byzantine identities, attack labels, or metrics.
         recovery_triggered = False
         recovery_reasons = []
 
         if _RECOVERY_ENABLED:
             health = assess_server_model_health(
                 candidate_parameters,
+                previous_server_state,
                 previous_stable_state,
-                initial_parameter_norm,
             )
 
             print(
-                "  [Model Health] param_norm={:.6g} / threshold={:.6g} | "
-                "drift={:.6g} / threshold={:.6g}".format(
+                "  [Model Health] "
+                "param_norm={:.6f} | "
+                "previous_norm={:.6f} | "
+                "drift={:.6f} | "
+                "norm_threshold={:.6f} | "
+                "drift_threshold={:.6f}".format(
                     health["parameter_norm"],
-                    health["parameter_norm_threshold"],
+                    health["previous_norm"],
                     health["parameter_drift"],
+                    health["parameter_norm_threshold"],
                     health["drift_threshold"],
                 )
             )
 
             if not health["healthy"]:
                 recovery_triggered = True
-                recovery_reasons = list(health["recovery_reasons"])
+                recovery_reasons = list(
+                    health["recovery_reasons"]
+                )
                 recovery_count += 1
-                global_parameters = _clone_state_dict(previous_stable_state)
-                net.load_state_dict(global_parameters, strict=True)
+
                 print(
-                    "  [Recovery] Candidate rejected; restoring previous "
-                    "structurally stable checkpoint. Reason(s): {}".format(
+                    "  [Recovery] Candidate rejected; restoring "
+                    "previous structurally stable server checkpoint."
+                )
+                print(
+                    "  [Recovery] Reason(s): {}".format(
                         ", ".join(recovery_reasons)
                     )
                 )
+
+                global_parameters = _clone_state_dict(
+                    previous_stable_state
+                )
+                net.load_state_dict(
+                    global_parameters,
+                    strict=True,
+                )
+
+                # The rejected candidate is never used as history.
+                previous_server_state = _clone_state_dict(
+                    previous_stable_state
+                )
+
             else:
-                global_parameters = _clone_state_dict(candidate_parameters)
-                previous_stable_state = _clone_state_dict(global_parameters)
+                global_parameters = _clone_state_dict(
+                    candidate_parameters
+                )
+
+                previous_server_state = _clone_state_dict(
+                    global_parameters
+                )
+                previous_stable_state = _clone_state_dict(
+                    global_parameters
+                )
+
+                print("  [Recovery] Candidate accepted.")
+
         else:
-            global_parameters = candidate_parameters
-            previous_stable_state = _clone_state_dict(global_parameters)
+            global_parameters = _clone_state_dict(
+                candidate_parameters
+            )
+            previous_server_state = _clone_state_dict(
+                global_parameters
+            )
+            previous_stable_state = _clone_state_dict(
+                global_parameters
+            )
 
         # ── Test evaluation ONLY ──────────────────────────────────────────────
         #
@@ -1487,8 +1571,9 @@ def run_experiment(
             "iid": cfg["IID"],
             "num_comm": cfg["num_comm"],
             "checkpoint_recovery": _RECOVERY_ENABLED,
-            "recovery_param_norm_ratio": _RECOVERY_PARAM_NORM_RATIO,
+            "recovery_norm_ratio": _RECOVERY_NORM_RATIO,
             "recovery_drift_ratio": _RECOVERY_DRIFT_RATIO,
+            "recovery_max_norm_multiplier": _RECOVERY_MAX_NORM_MULTIPLIER,
         },
 
         "round_results": round_results,
