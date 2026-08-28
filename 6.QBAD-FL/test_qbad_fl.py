@@ -834,7 +834,7 @@ def collect_attack_updates(
 # Recovery is deliberately conservative: it is intended to catch catastrophic
 # structural corruption, not ordinary accuracy fluctuations.
 _RECOVERY_ENABLED = True
-_RECOVERY_PARAM_NORM_RATIO = 10.0
+_RECOVERY_NORM_RATIO = 10.0
 _RECOVERY_DRIFT_RATIO = 5.0
 _RECOVERY_EPS = 1e-12
 
