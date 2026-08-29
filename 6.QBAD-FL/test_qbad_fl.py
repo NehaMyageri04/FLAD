@@ -2,7 +2,6 @@
 test_qbad_fl.py — Validation test for QBAD-FL.
 
 The experiment evaluates the QBAD-FL Byzantine detection pipeline using:
-
     1. Label-independent norm filtering
     2. Fixed VQC feature extraction
     3. Isolation Forest anomaly detection
@@ -13,14 +12,11 @@ The experiment evaluates the QBAD-FL Byzantine detection pipeline using:
 
 IMPORTANT EXPERIMENTAL RULE
 ---------------------------
-
 Ground-truth Byzantine identities are used ONLY for:
-
     - constructing simulated attacks
     - post-hoc evaluation/debug output
 
 They are NOT used for:
-
     - norm threshold calculation
     - VQC feature extraction
     - Isolation Forest
@@ -32,7 +28,6 @@ They are NOT used for:
 The test set is used ONLY for post-round evaluation.
 
 There is intentionally NO checkpoint recovery based on test accuracy.
-
 This prevents the evaluation set from influencing future FL rounds.
 """
 
@@ -47,6 +42,7 @@ import torch.nn.functional as F
 from torch import optim
 from sklearn.ensemble import IsolationForest
 
+
 # ── Import setup ──────────────────────────────────────────────────────────────
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -54,9 +50,11 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
+
 from Models import Mnist_CNN, ResNet18, QuantumByzantineDetector
 from clients import ClientsGroup
 import Attack
+
 from metrics import (
     calculate_detection_rate,
     calculate_false_positive_rate,
@@ -68,6 +66,7 @@ from metrics import (
     save_results_json,
     ATTACK_NAMES,
 )
+
 
 # ── Detector constants ────────────────────────────────────────────────────────
 
@@ -88,36 +87,44 @@ _FEATURE_NAN_FALLBACK = 0.5
 _SIGN_FLIP_COSINE_THRESHOLD = -0.5
 
 # Norm threshold multiplier.
-_NORM_OUTLIER_MULTIPLIER = 10
+_NORM_OUTLIER_MULTIPLIER = 10  # retained for backward compatibility
+
 
 # ── VQC feature extraction ────────────────────────────────────────────────────
-
 
 def feature_extraction_model(Central_par, cfg, dev):
     """
     Initialize two separate fixed QuantumByzantineDetectors.
+
     One detector processes conv1 weights.
     One detector processes fc weights.
+
     The VQC parameters are fixed and are NOT trained using
     Byzantine labels or test-set performance.
     """
+
     if cfg["data_name"] == "mnist":
+
         detector_conv1 = QuantumByzantineDetector(
             dimen=10 * 1 * 5 * 5,
             num_qubits=8,
             num_layers=5,
         )
+
         detector_fc = QuantumByzantineDetector(
             dimen=10 * 320,
             num_qubits=8,
             num_layers=5,
         )
+
     else:
+
         detector_conv1 = QuantumByzantineDetector(
             dimen=64 * 3 * 3 * 3,
             num_qubits=8,
             num_layers=5,
         )
+
         detector_fc = QuantumByzantineDetector(
             dimen=10 * 512,
             num_qubits=8,
@@ -133,16 +140,17 @@ def feature_extraction_model(Central_par, cfg, dev):
 
 # ── Sign-flip detector ────────────────────────────────────────────────────────
 
-
 def detect_sign_flip_attacks(Upload_Parameters, nc):
     """
     Detect sign-flip anomalies using ONLY the current submitted updates.
+
     No:
         - honest-client identities
         - Byzantine-client identities
         - Byzantine labels
         - trusted honest history
         - known Byzantine count
+
     are used by the detector.
 
     The reference direction is calculated from the current population
@@ -152,6 +160,7 @@ def detect_sign_flip_attacks(Upload_Parameters, nc):
     ----------
     Upload_Parameters : list
         Submitted client model updates.
+
     nc : int
         Total number of clients.
 
@@ -160,27 +169,35 @@ def detect_sign_flip_attacks(Upload_Parameters, nc):
     list
         Indices detected as sign-flip anomalies.
     """
+
     if not Upload_Parameters:
         return []
 
     directions = []
+
     # Normalize every submitted update.
     for update in Upload_Parameters:
+
         flat = torch.cat(
             [
                 update[k].flatten()
                 for k in sorted(update.keys())
             ]
         ).detach()
+
         norm = torch.norm(flat).item()
+
         if norm <= 1e-12:
+
             directions.append(
                 np.zeros_like(
                     flat.cpu().numpy(),
                     dtype=np.float64,
                 )
             )
+
         else:
+
             directions.append(
                 (flat / norm)
                 .cpu()
@@ -197,6 +214,7 @@ def detect_sign_flip_attacks(Upload_Parameters, nc):
         directions,
         axis=0,
     )
+
     reference_norm = float(
         np.linalg.norm(reference)
     )
@@ -207,18 +225,23 @@ def detect_sign_flip_attacks(Upload_Parameters, nc):
     reference = reference / reference_norm
 
     detected = []
+
     # nc is ONLY the total-client loop bound.
     for c in range(
         min(nc, len(directions))
     ):
+
         cosine_sim = float(
             np.dot(
                 reference,
                 directions[c],
             )
         )
+
         if cosine_sim < _SIGN_FLIP_COSINE_THRESHOLD:
+
             detected.append(c)
+
             print(
                 "  [Sign-Flip Detection] "
                 "Client {} cosine_sim={:.4f} → FLAGGED".format(
@@ -228,6 +251,7 @@ def detect_sign_flip_attacks(Upload_Parameters, nc):
             )
 
     if detected:
+
         print(
             "  [Sign-Flip Detection] "
             "Detected {} flip anomalies: {}".format(
@@ -241,88 +265,89 @@ def detect_sign_flip_attacks(Upload_Parameters, nc):
 
 # ── VQC + Isolation Forest ────────────────────────────────────────────────────
 
-
 def vqc_feature_extraction(
     Upload_Parameters,
     detector_conv1,
     detector_fc,
     cfg,
     dev,
-    original_indices=None,
 ):
     """
     Extract fixed VQC features from submitted updates and perform
     Isolation Forest anomaly detection.
+
     Sign-flip detection is then performed using the current submitted
     population only.
     """
-    # VQC receives only the updates that survived the norm-filter stage.
-    local_nc = len(Upload_Parameters)
 
-    if original_indices is None:
-        original_indices = list(range(local_nc))
-
-    if len(original_indices) != local_nc:
-        raise ValueError(
-            "original_indices length {} does not match {} retained updates."
-            .format(len(original_indices), local_nc)
-        )
-
-    if local_nc == 0:
-        return []
+    nc = cfg["num_of_clients"]
 
     # ── Extract relevant model tensors ────────────────────────────────────────
+
     if cfg["data_name"] == "mnist":
+
         k1 = torch.zeros(
-            local_nc,
+            nc,
             10,
             1,
             5,
             5,
         ).to(dev)
+
         w3 = torch.zeros(
-            local_nc,
+            nc,
             10,
             320,
         ).to(dev)
+
     else:
+
         k1 = torch.zeros(
-            local_nc,
+            nc,
             64,
             3,
             3,
             3,
         ).to(dev)
+
         w3 = torch.zeros(
-            local_nc,
+            nc,
             10,
             512,
         ).to(dev)
 
     for i, W in enumerate(Upload_Parameters):
+
         if cfg["data_name"] == "mnist":
+
             k1[i] = W["conv1.weight"].data
             w3[i] = W["fc.weight"].data
+
         else:
+
             k1[i] = W["module.conv1.weight"].data
             w3[i] = W["module.fc.weight"].data
 
     # ── Fixed VQC feature extraction ──────────────────────────────────────────
+
     print(
         "  [VQC] Extracting quantum features "
         "(27-D per detector, 54-D total)..."
     )
+
     with torch.no_grad():
+
         features_conv1 = (
             detector_conv1(
-                k1.view(local_nc, -1)
+                k1.view(nc, -1)
             )
             .cpu()
             .numpy()
         )
+
         features_fc = (
             detector_fc(
-                w3.view(local_nc, -1)
+                w3.view(nc, -1)
             )
             .cpu()
             .numpy()
@@ -331,32 +356,35 @@ def vqc_feature_extraction(
     expected_conv1_dim = (
         detector_conv1.num_qubits * 3 + 3
     )
+
     expected_fc_dim = (
         detector_fc.num_qubits * 3 + 3
     )
 
     if features_conv1.shape != (
-        local_nc,
+        nc,
         expected_conv1_dim,
     ):
+
         raise ValueError(
             "Unexpected conv1 feature shape: {} "
             "(expected ({}, {}))".format(
                 features_conv1.shape,
-                local_nc,
+                nc,
                 expected_conv1_dim,
             )
         )
 
     if features_fc.shape != (
-        local_nc,
+        nc,
         expected_fc_dim,
     ):
+
         raise ValueError(
             "Unexpected fc feature shape: {} "
             "(expected ({}, {}))".format(
                 features_fc.shape,
-                local_nc,
+                nc,
                 expected_fc_dim,
             )
         )
@@ -370,11 +398,14 @@ def vqc_feature_extraction(
     )
 
     # ── NaN protection ────────────────────────────────────────────────────────
+
     if np.isnan(feature).any():
+
         print(
             "  [Warning] NaN in features, "
             "replacing with column means"
         )
+
         col_mean = np.nan_to_num(
             np.nanmean(
                 feature,
@@ -382,6 +413,7 @@ def vqc_feature_extraction(
             ),
             nan=_FEATURE_NAN_FALLBACK,
         )
+
         feature = np.where(
             np.isnan(feature),
             col_mean,
@@ -393,6 +425,7 @@ def vqc_feature_extraction(
             feature.shape
         )
     )
+
     print(
         "    Feature ranges: "
         "min={:.4f}  max={:.4f}  mean={:.4f}".format(
@@ -403,52 +436,61 @@ def vqc_feature_extraction(
     )
 
     # ── Isolation Forest ──────────────────────────────────────────────────────
+
     malicious = []
+
     try:
+
         clf = IsolationForest(
             contamination=_IFOREST_CONTAMINATION,
             random_state=42,
             n_estimators=_IFOREST_N_ESTIMATORS,
         )
+
         predictions = clf.fit_predict(
             feature
         )
+
         malicious = [
-            original_indices[c]
-            for c in range(local_nc)
+            c
+            for c in range(nc)
             if predictions[c] == -1
         ]
+
         print(
             "  [Isolation Forest] Predictions: {}".format(
                 predictions.tolist()
             )
         )
+
         print(
             "  [VQC Detection] Detected {} anomalies: {}".format(
                 len(malicious),
                 malicious,
             )
         )
+
     except Exception as e:
+
         print(
             "  [Warning] Isolation Forest failed: {}".format(
                 e
             )
         )
+
         malicious = []
 
     # ── Sign-flip detector ────────────────────────────────────────────────────
-    flip_detected_local = detect_sign_flip_attacks(
+
+    flip_detected = detect_sign_flip_attacks(
         Upload_Parameters,
-        local_nc,
+        nc,
     )
-    flip_detected = [
-        original_indices[c]
-        for c in flip_detected_local
-    ]
 
     # ── Ensemble ──────────────────────────────────────────────────────────────
+
     vqc_detected = list(malicious)
+
     malicious = list(
         set(vqc_detected)
         |
@@ -456,6 +498,7 @@ def vqc_feature_extraction(
     )
 
     if flip_detected:
+
         print(
             "  [Ensemble] Combined "
             "VQC={} + SignFlip={} → Final={}".format(
@@ -470,20 +513,20 @@ def vqc_feature_extraction(
 
 # ── Norm filtering ────────────────────────────────────────────────────────────
 
-
 def detect_norm_outliers(
     Upload_Parameters,
     cfg,
     dev,
 ):
     """
-    Detect magnitude outliers using the complete submitted population.
-    The threshold is NOT based on:
-        - honest clients
-        - Byzantine clients
-        - Byzantine count
-        - attack labels
-        - trusted history
+    Detect magnitude outliers using a robust MAD-based population threshold.
+
+    The threshold is computed only from the norms of the complete submitted
+    client population. No Byzantine identities, Byzantine count, attack labels,
+    test data, validation data, or accuracy are used.
+
+    A small relative MAD floor prevents the threshold from collapsing when
+    honest norms are nearly identical.
     """
     norms = [
         torch.norm(
@@ -500,14 +543,32 @@ def detect_norm_outliers(
     if not norms:
         return []
 
-    # Label-independent population reference.
-    median_norm = float(
-        np.median(norms)
+    all_norms = np.asarray(norms, dtype=np.float64)
+    median_norm = float(np.median(all_norms))
+
+    mad = float(
+        np.median(
+            np.abs(all_norms - median_norm)
+        )
     )
+
+    # Consistency factor for a Gaussian-like reference distribution.
+    mad_scaled = mad * 1.4826
+
+    # Protect against an almost-zero MAD when the honest population is tightly
+    # concentrated. This remains purely population-derived and label-free.
+    mad_floor = max(
+        median_norm * 0.05,
+        1e-12,
+    )
+    mad_scaled = max(
+        mad_scaled,
+        mad_floor,
+    )
+
     threshold = (
         median_norm
-        *
-        _NORM_OUTLIER_MULTIPLIER
+        + 3.0 * mad_scaled
     )
 
     norm_rejected = [
@@ -516,13 +577,20 @@ def detect_norm_outliers(
         if norm > threshold
     ]
 
+    print(
+        "  [Norm Filter] Median={:.4f} MAD={:.4f} "
+        "ScaledMAD={:.4f} Threshold={:.4f}".format(
+            median_norm,
+            mad,
+            mad_scaled,
+            threshold,
+        )
+    )
+
     if norm_rejected:
         print(
-            "  [Norm Filter] "
-            "Population median norm: {:.4f}, "
-            "Threshold: {:.4f}".format(
-                median_norm,
-                threshold,
+            "  [Norm Filter] Rejected: {}".format(
+                norm_rejected
             )
         )
 
@@ -531,15 +599,16 @@ def detect_norm_outliers(
 
 # ── Label-independent clipping ────────────────────────────────────────────────
 
-
 def clip_gradient_norms(
     Upload_Parameters,
     cfg,
 ):
     """
-    Clip oversized updates using a threshold calculated from
-    the complete submitted population.
-    No ground-truth client information is used.
+    Clip oversized updates using the same label-independent MAD-based
+    population threshold as the norm-rejection stage.
+
+    This stage does not use Byzantine identities, attack labels, test data,
+    validation data, or accuracy.
     """
     norms = [
         torch.norm(
@@ -556,37 +625,42 @@ def clip_gradient_norms(
     if not norms:
         return
 
-    median_norm = float(
-        np.median(norms)
+    all_norms = np.asarray(norms, dtype=np.float64)
+    median_norm = float(np.median(all_norms))
+
+    mad = float(
+        np.median(
+            np.abs(all_norms - median_norm)
+        )
     )
+
+    mad_scaled = max(
+        mad * 1.4826,
+        max(median_norm * 0.05, 1e-12),
+    )
+
     max_allowed = (
         median_norm
-        *
-        _NORM_OUTLIER_MULTIPLIER
+        + 3.0 * mad_scaled
     )
 
     clipped_count = 0
+
     for i, update in enumerate(
         Upload_Parameters
     ):
         if norms[i] > max_allowed:
-            scale = (
-                max_allowed
-                /
-                norms[i]
-            )
+            scale = max_allowed / norms[i]
+
             for k in update:
-                update[k] = (
-                    update[k]
-                    *
-                    scale
-                )
+                update[k] = update[k] * scale
+
             clipped_count += 1
 
     if clipped_count > 0:
         print(
-            "  [Gradient Clipping] "
-            "Clipped {} updates to max norm {:.4f}".format(
+            "  [Gradient Clipping] Clipped {} updates "
+            "to max norm {:.4f}".format(
                 clipped_count,
                 max_allowed,
             )
@@ -595,15 +669,16 @@ def clip_gradient_norms(
 
 # ── Federated averaging ───────────────────────────────────────────────────────
 
-
 def fed_avg(
     Upload_Parameters,
     malicious,
 ):
     """
     Aggregate only updates that were identified by the detector.
+
     The malicious list comes exclusively from detector outputs.
     """
+
     params = list(
         Upload_Parameters
     )
@@ -611,6 +686,7 @@ def fed_avg(
     for j, idx in enumerate(
         sorted(malicious)
     ):
+
         del params[
             idx - j
         ]
@@ -621,25 +697,32 @@ def fed_avg(
         )
 
     total = len(params)
+
     agg = None
+
     for p in params:
+
         if agg is None:
+
             agg = {
                 k: v.clone()
                 for k, v in p.items()
             }
+
         else:
+
             for k in p:
+
                 agg[k] += p[k]
 
     for k in agg:
+
         agg[k] /= total
 
     return agg
 
 
 # ── Attack construction ───────────────────────────────────────────────────────
-
 
 def collect_attack_updates(
     byzantine_clients,
@@ -657,38 +740,56 @@ def collect_attack_updates(
 ):
     """
     Construct simulated Byzantine updates.
+
     Ground-truth Byzantine identities are required here because this
     function is constructing the simulated attack population.
+
     This information does NOT enter the detector.
     """
+
     uploads = []
+
     for client in byzantine_clients:
+
         lp = {}
+
         if pattern == 0:
+
             for key in honest_all_weight:
+
                 lp[key] = Attack.Gaussian_attack(
                     honest_all_weight[key]
                 )
+
         elif pattern == 1:
+
             for key in honest_all_weight:
+
                 lp[key] = Attack.Sign_flipping_attack(
                     honest_all_weight[key]
                 )
+
         elif pattern == 2:
+
             byz = sum(
                 1
                 for _ in byzantine_clients
             )
+
             for key in honest_all_weight:
+
                 lp[key] = Attack.ZeroGradient_attack(
                     honest_all_weight[key],
                     byz,
                 )
+
         elif pattern == 3:
+
             pc = Attack.backdoor_poisoning_data(
                 myClients.clients_set[client],
                 data_name,
             )
+
             lp = pc.localTrain(
                 epoch,
                 batchsize,
@@ -697,11 +798,14 @@ def collect_attack_updates(
                 opti,
                 global_parameters,
             )
+
         elif pattern == 4:
+
             pc = Attack.model_replacement_attack_data(
                 myClients.clients_set[client],
                 data_name,
             )
+
             lp = pc.localTrain(
                 epoch,
                 batchsize,
@@ -710,22 +814,31 @@ def collect_attack_updates(
                 opti,
                 global_parameters,
             )
+
             for key in lp:
+
                 lp[key] = (
                     lp[key]
                     *
                     num_clients
                 )
+
         elif pattern == 5:
+
             for key in honest_all_weight:
+
                 lp[key] = Attack.MPAF(
                     honest_all_weight[key]
                 )
+
         elif pattern == 6:
+
             for key in honest_all_weight:
+
                 lp[key] = Attack.AGR_agnostic(
                     honest_all_weight[key]
                 )
+
         uploads.append(lp)
 
     return uploads
@@ -738,7 +851,6 @@ def collect_attack_updates(
 _RECOVERY_ENABLED = True
 _RECOVERY_NORM_RATIO = 10.0
 _RECOVERY_DRIFT_RATIO = 5.0
-
 # Absolute ceiling multiplier for the last stable server model.
 # This is server-side structural monitoring only; it never uses test/validation data.
 _RECOVERY_MAX_NORM_MULTIPLIER = 10.0
@@ -800,6 +912,7 @@ def assess_server_model_health(
 
     It compares the candidate only with previously accepted server models.
     """
+
     current_norm = _state_dict_parameter_norm(current_state)
     previous_norm = _state_dict_parameter_norm(previous_state)
     stable_norm = _state_dict_parameter_norm(previous_stable_state)
@@ -843,10 +956,13 @@ def assess_server_model_health(
     )
 
     reasons = []
+
     if nonfinite:
         reasons.append("non-finite parameters")
+
     if norm_explosion:
         reasons.append("structural parameter-norm explosion")
+
     if excessive_drift:
         reasons.append("excessive round-to-round parameter drift")
 
@@ -862,9 +978,7 @@ def assess_server_model_health(
         "recovery_reasons": reasons,
     }
 
-
 # ── Main experiment runner ─────────────────────────────────────────────────────
-
 
 def run_experiment(
     cfg,
@@ -876,39 +990,50 @@ def run_experiment(
     IMPORTANT:
     Test accuracy is NEVER used to modify the model,
     select checkpoints, trigger recovery, or affect future rounds.
+
     Checkpoint recovery, when enabled, is driven ONLY by server-side
     structural health checks on the aggregated global model. No test data,
     validation data, Byzantine labels, detection metrics, or attack identities
     are used by the recovery mechanism.
     """
+
     dev = torch.device(
         "cpu"
     )
 
     # ── Model ─────────────────────────────────────────────────────────────────
+
     if cfg["data_name"] == "mnist":
+
         net = Mnist_CNN()
+
     else:
+
         net = ResNet18()
+
     net = net.to(dev)
 
     loss_func = F.cross_entropy
+
     opti = optim.SGD(
         net.parameters(),
         lr=cfg["learning_rate"],
     )
 
     # ── Clients ───────────────────────────────────────────────────────────────
+
     myClients = ClientsGroup(
         cfg["data_name"],
         cfg["IID"],
         cfg["num_of_clients"],
         dev,
     )
+
     myClients.get_central_data(
         cfg["central_data_size"],
         cfg["central_data_pro"],
     )
+
     testDataLoader = (
         myClients.test_data_loader
     )
@@ -920,21 +1045,27 @@ def run_experiment(
     #   - evaluation
     #
     # They are NOT passed to detectors.
+
     nc = cfg["num_of_clients"]
+
     byz = cfg["byzantine_size"]
+
     honest_clients = [
         "client{}".format(i)
         for i in range(nc - byz)
     ]
+
     byzantine_clients = [
         "client{}".format(i)
         for i in range(nc - byz, nc)
     ]
+
     actual_malicious_indices = list(
         range(nc - byz, nc)
     )
 
     # ── Initial global model ──────────────────────────────────────────────────
+
     global_parameters = {
         k: v.clone()
         for k, v in net.state_dict().items()
@@ -949,15 +1080,21 @@ def run_experiment(
     previous_server_state = _clone_state_dict(global_parameters)
 
     recovery_count = 0
+
     round_results = []
+
     start = time.time()
 
     # ── Federated rounds ──────────────────────────────────────────────────────
+
     for rnd in range(
         cfg["num_comm"]
     ):
+
         rnd_start = time.time()
+
         if verbose:
+
             print(
                 "\n─── Round {}/{} ───".format(
                     rnd + 1,
@@ -966,6 +1103,7 @@ def run_experiment(
             )
 
         # ── Central training ──────────────────────────────────────────────────
+
         Central_par = myClients.centralTrain(
             cfg["epoch"],
             cfg["batchsize"],
@@ -985,9 +1123,13 @@ def run_experiment(
         )
 
         # ── Honest client updates ─────────────────────────────────────────────
+
         Upload_Parameters = []
+
         honest_all_weight = None
+
         for cl in honest_clients:
+
             lp = myClients.clients_set[
                 cl
             ].localTrain(
@@ -998,22 +1140,29 @@ def run_experiment(
                 opti,
                 global_parameters,
             )
+
             Upload_Parameters.append(
                 lp
             )
+
             # Used ONLY to construct simulated attacks.
             if (
                 cfg["pattern"] <= 2
                 or
                 cfg["pattern"] >= 5
             ):
+
                 if honest_all_weight is None:
+
                     honest_all_weight = {
                         k: v.clone().unsqueeze(0)
                         for k, v in lp.items()
                     }
+
                 else:
+
                     for k in lp:
+
                         honest_all_weight[k] = torch.cat(
                             [
                                 honest_all_weight[k],
@@ -1023,6 +1172,7 @@ def run_experiment(
                         )
 
         # ── Byzantine attack construction ────────────────────────────────────
+
         byz_uploads = collect_attack_updates(
             byzantine_clients,
             myClients,
@@ -1044,16 +1194,19 @@ def run_experiment(
         # do we pass the complete population to the detectors.
         #
         # No honest-only history is constructed for detection.
+
         Upload_Parameters.extend(
             byz_uploads
         )
 
         # ── Stage 1: Norm filtering ───────────────────────────────────────────
+
         norm_rejected = detect_norm_outliers(
             Upload_Parameters,
             cfg,
             dev,
         )
+
         print(
             "  [Norm Filter] Rejected: {}".format(
                 norm_rejected
@@ -1061,45 +1214,26 @@ def run_experiment(
         )
 
         # ── Stage 2: VQC + sign-flip detection ───────────────────────────────
-        #
-        # Sequential pipeline:
-        #   Stage 1 norm filtering
-        #       ↓
-        #   remove rejected updates
-        #       ↓
-        #   VQC + Isolation Forest + sign-flip detection
-        #
-        # The retained list keeps the original client indices so detector
-        # outputs still map correctly to the full client population.
-        norm_rejected_set = set(norm_rejected)
-        retained_indices = [
-            i
-            for i in range(nc)
-            if i not in norm_rejected_set
-        ]
-        retained_updates = [
-            Upload_Parameters[i]
-            for i in retained_indices
-        ]
 
         vqc_detected = vqc_feature_extraction(
-            retained_updates,
+            Upload_Parameters,
             detector_conv1,
             detector_fc,
             cfg,
             dev,
-            original_indices=retained_indices,
         )
 
         # ── Stage 3: Ensemble ─────────────────────────────────────────────────
+
         detected = list(
             set(norm_rejected)
             |
             set(vqc_detected)
         )
+
         print(
             "  [Ensemble] "
-            "Norm filter={} + VQC+SignFlip={} → Final={}: {}".format(
+            "Norm filter={} + VQC={} → Final={}: {}".format(
                 len(norm_rejected),
                 len(vqc_detected),
                 len(detected),
@@ -1108,10 +1242,13 @@ def run_experiment(
         )
 
         # ── DEBUG / EVALUATION ONLY ──────────────────────────────────────────
+
         print(
             "\n  [DEBUG] Gradient Norms Analysis:"
         )
+
         norms = [
+
             torch.norm(
                 torch.cat(
                     [
@@ -1120,15 +1257,20 @@ def run_experiment(
                     ]
                 )
             ).item()
+
             for u in Upload_Parameters
         ]
+
         honest_end = nc - byz
+
         for i, n in enumerate(norms):
+
             is_byz = (
                 " ← BYZANTINE"
                 if i >= honest_end
                 else ""
             )
+
             print(
                 "    Client {:2d}: norm={:.4f}{}".format(
                     i,
@@ -1138,6 +1280,7 @@ def run_experiment(
             )
 
         if honest_end > 0:
+
             print(
                 "    Honest norms - "
                 "Median: {:.4f}, Mean: {:.4f}, Std: {:.4f}".format(
@@ -1152,13 +1295,16 @@ def run_experiment(
                     ),
                 )
             )
+
         else:
+
             print(
                 "    Honest norms - N/A "
                 "(no honest clients)"
             )
 
         if byz > 0:
+
             print(
                 "    Byz norms   - "
                 "Median: {:.4f}, Mean: {:.4f}, Std: {:.4f}".format(
@@ -1173,19 +1319,23 @@ def run_experiment(
                     ),
                 )
             )
+
         else:
+
             print(
                 "    Byz norms   - N/A "
                 "(no Byzantine clients)"
             )
 
         # ── Stage 4: Label-independent clipping ──────────────────────────────
+
         clip_gradient_norms(
             Upload_Parameters,
             cfg,
         )
 
         # ── Stage 5: Federated aggregation ───────────────────────────────────
+
         candidate_parameters = fed_avg(
             list(Upload_Parameters),
             detected,
@@ -1206,6 +1356,7 @@ def run_experiment(
                 previous_server_state,
                 previous_stable_state,
             )
+
             print(
                 "  [Model Health] "
                 "param_norm={:.6f} | "
@@ -1227,6 +1378,7 @@ def run_experiment(
                     health["recovery_reasons"]
                 )
                 recovery_count += 1
+
                 print(
                     "  [Recovery] Candidate rejected; restoring "
                     "previous structurally stable server checkpoint."
@@ -1236,6 +1388,7 @@ def run_experiment(
                         ", ".join(recovery_reasons)
                     )
                 )
+
                 global_parameters = _clone_state_dict(
                     previous_stable_state
                 )
@@ -1243,21 +1396,26 @@ def run_experiment(
                     global_parameters,
                     strict=True,
                 )
+
                 # The rejected candidate is never used as history.
                 previous_server_state = _clone_state_dict(
                     previous_stable_state
                 )
+
             else:
                 global_parameters = _clone_state_dict(
                     candidate_parameters
                 )
+
                 previous_server_state = _clone_state_dict(
                     global_parameters
                 )
                 previous_stable_state = _clone_state_dict(
                     global_parameters
                 )
+
                 print("  [Recovery] Candidate accepted.")
+
         else:
             global_parameters = _clone_state_dict(
                 candidate_parameters
@@ -1280,56 +1438,73 @@ def run_experiment(
         #   - change aggregation
         #
         # It is purely reported evaluation.
+
         net.load_state_dict(
             global_parameters,
             strict=True,
         )
+
         sum_accu = 0.0
         num_batches = 0
+
         with torch.no_grad():
+
             for data, label in testDataLoader:
+
                 data = data.to(dev)
                 label = label.to(dev)
+
                 preds = torch.argmax(
                     net(data),
                     dim=1,
                 )
+
                 sum_accu += (
                     (preds == label)
                     .float()
                     .mean()
                     .item()
                 )
+
                 num_batches += 1
+
         if num_batches > 0:
+
             accuracy = (
                 sum_accu
                 /
                 num_batches
             )
+
         else:
+
             accuracy = 0.0
 
         # ── Detection metrics ────────────────────────────────────────────────
         #
         # Ground truth enters ONLY here for evaluation.
+
         dr = calculate_detection_rate(
             detected,
             actual_malicious_indices,
         )
+
         fpr = calculate_false_positive_rate(
             detected,
             actual_malicious_indices,
             nc,
         )
+
         prec = calculate_precision(
             detected,
             actual_malicious_indices,
         )
+
         rec = calculate_recall(
             detected,
             actual_malicious_indices,
         )
+
         f1 = calculate_f1(
             detected,
             actual_malicious_indices,
@@ -1356,11 +1531,13 @@ def run_experiment(
             "actual_malicious": actual_malicious_indices,
             "round_time_seconds": rnd_time,
         }
+
         round_results.append(
             rnd_result
         )
 
         if verbose:
+
             print(
                 "  accuracy={:.2%}  "
                 "detection_rate={:.2%}  "
@@ -1374,11 +1551,13 @@ def run_experiment(
                     rnd_time,
                 )
             )
+
             print(
                 "  Detected malicious: {}".format(
                     sorted(detected)
                 )
             )
+
             print(
                 "  Actual  malicious : {}".format(
                     actual_malicious_indices
@@ -1386,11 +1565,13 @@ def run_experiment(
             )
 
     # ── Experiment summary ────────────────────────────────────────────────────
+
     total_time = (
         time.time()
         -
         start
     )
+
     summary = aggregate_round_metrics(
         round_results
     )
@@ -1412,29 +1593,45 @@ def run_experiment(
             "recovery_drift_ratio": _RECOVERY_DRIFT_RATIO,
             "recovery_max_norm_multiplier": _RECOVERY_MAX_NORM_MULTIPLIER,
         },
+
         "round_results": round_results,
+
         "summary": summary,
+
         "total_runtime_seconds": total_time,
     }
 
 
 # ── Default configuration ─────────────────────────────────────────────────────
 
-
 def _default_config():
+
     return {
+
         "data_name": "mnist",
+
         "num_of_clients": 20,
+
         "byzantine_size": 5,
+
         "pattern": 5,
+
         "epoch": 5,
+
         "batchsize": 64,
+
         "learning_rate": 0.1,
+
         "num_comm": 3,
+
         "IID": True,
+
         "central_data_size": 300,
+
         "central_data_pro": 0.1,
+
         "alpha": 0.5,
+
         "iforest_contamination":
             _IFOREST_CONTAMINATION,
     }
@@ -1442,12 +1639,13 @@ def _default_config():
 
 # ── Command-line interface ────────────────────────────────────────────────────
 
-
 def main():
+
     parser = argparse.ArgumentParser(
         description="QBAD-FL validation test",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+
     parser.add_argument(
         "--dataset",
         default="mnist",
@@ -1456,24 +1654,28 @@ def main():
             "cifar_10",
         ],
     )
+
     parser.add_argument(
         "--rounds",
         type=int,
         default=3,
         help="Communication rounds",
     )
+
     parser.add_argument(
         "--clients",
         type=int,
         default=20,
         help="Total clients",
     )
+
     parser.add_argument(
         "--byzantine",
         type=int,
         default=5,
         help="Byzantine clients",
     )
+
     parser.add_argument(
         "--attacks",
         nargs="+",
@@ -1490,6 +1692,7 @@ def main():
             "6=AGR-agnostic"
         ),
     )
+
     parser.add_argument(
         "--quick",
         action="store_true",
@@ -1501,6 +1704,7 @@ def main():
             "1 MPAF attack"
         ),
     )
+
     parser.add_argument(
         "--output",
         default=None,
@@ -1508,6 +1712,7 @@ def main():
             "Optional JSON output path"
         ),
     )
+
     parser.add_argument(
         "--iid",
         type=lambda x:
@@ -1527,11 +1732,17 @@ def main():
     args = parser.parse_args()
 
     # ── Quick mode ────────────────────────────────────────────────────────────
+
     if args.quick:
+
         args.clients = 10
+
         args.byzantine = 5
+
         args.rounds = 2
+
         args.attacks = [5]
+
         print(
             "Quick mode: "
             "10 clients, "
@@ -1541,19 +1752,25 @@ def main():
         )
 
     # ── Configuration ─────────────────────────────────────────────────────────
+
     cfg = _default_config()
+
     cfg["data_name"] = (
         args.dataset
     )
+
     cfg["num_comm"] = (
         args.rounds
     )
+
     cfg["num_of_clients"] = (
         args.clients
     )
+
     cfg["byzantine_size"] = (
         args.byzantine
     )
+
     cfg["IID"] = (
         args.iid
     )
@@ -1561,13 +1778,17 @@ def main():
     all_results = []
 
     # ── Run requested attacks ─────────────────────────────────────────────────
+
     for attack in args.attacks:
+
         cfg["pattern"] = attack
+
         print(
             "\n"
             +
             "=" * 65
         )
+
         print(
             "Attack: {} ({})".format(
                 attack,
@@ -1577,16 +1798,20 @@ def main():
                 ),
             )
         )
+
         print(
             "=" * 65
         )
+
         results = run_experiment(
             cfg,
             verbose=True,
         )
+
         all_results.append(
             results
         )
+
         print(
             generate_report(
                 results,
@@ -1599,18 +1824,23 @@ def main():
         )
 
     # ── Multi-attack summary ──────────────────────────────────────────────────
+
     if len(all_results) > 1:
+
         print(
             "\n\n"
             +
             "=" * 65
         )
+
         print(
             "Multi-Attack Summary".center(65)
         )
+
         print(
             "=" * 65
         )
+
         print(
             "{:<20s} {:>10s} {:>14s} {:>10s}".format(
                 "Attack",
@@ -1619,11 +1849,15 @@ def main():
                 "FPR",
             )
         )
+
         print(
             "-" * 55
         )
+
         for r in all_results:
+
             s = r["summary"]
+
             print(
                 "{:<20s} {:>10.2%} {:>14.2%} {:>10.2%}".format(
                     r["config"]["attack_name"],
@@ -1650,12 +1884,15 @@ def main():
                     ),
                 )
             )
+
         print(
             "=" * 65
         )
 
     # ── Save results ──────────────────────────────────────────────────────────
+
     if args.output:
+
         save_results_json(
             {
                 "experiments":
