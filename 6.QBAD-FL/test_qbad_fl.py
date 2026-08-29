@@ -70,8 +70,9 @@ from metrics import (
 
 # ── Detector constants ────────────────────────────────────────────────────────
 
-# Retained for configuration/backward compatibility.
-# The detector no longer uses this as a fixed anomaly quota.
+# Fixed Isolation Forest contamination assumption.
+# IMPORTANT:
+# This is NOT dynamically obtained from ground-truth labels at runtime.
 _IFOREST_CONTAMINATION = 0.25
 
 # Fixed number of Isolation Forest trees.
@@ -270,6 +271,7 @@ def vqc_feature_extraction(
     detector_fc,
     cfg,
     dev,
+    original_indices=None,
 ):
     """
     Extract fixed VQC features from submitted updates and perform
@@ -279,14 +281,27 @@ def vqc_feature_extraction(
     population only.
     """
 
-    nc = cfg["num_of_clients"]
+    # VQC receives only the updates that survived the norm-filter stage.
+    local_nc = len(Upload_Parameters)
+
+    if original_indices is None:
+        original_indices = list(range(local_nc))
+
+    if len(original_indices) != local_nc:
+        raise ValueError(
+            "original_indices length {} does not match {} retained updates."
+            .format(len(original_indices), local_nc)
+        )
+
+    if local_nc == 0:
+        return []
 
     # ── Extract relevant model tensors ────────────────────────────────────────
 
     if cfg["data_name"] == "mnist":
 
         k1 = torch.zeros(
-            nc,
+            local_nc,
             10,
             1,
             5,
@@ -294,7 +309,7 @@ def vqc_feature_extraction(
         ).to(dev)
 
         w3 = torch.zeros(
-            nc,
+            local_nc,
             10,
             320,
         ).to(dev)
@@ -302,7 +317,7 @@ def vqc_feature_extraction(
     else:
 
         k1 = torch.zeros(
-            nc,
+            local_nc,
             64,
             3,
             3,
@@ -310,7 +325,7 @@ def vqc_feature_extraction(
         ).to(dev)
 
         w3 = torch.zeros(
-            nc,
+            local_nc,
             10,
             512,
         ).to(dev)
@@ -338,7 +353,7 @@ def vqc_feature_extraction(
 
         features_conv1 = (
             detector_conv1(
-                k1.view(nc, -1)
+                k1.view(local_nc, -1)
             )
             .cpu()
             .numpy()
@@ -346,7 +361,7 @@ def vqc_feature_extraction(
 
         features_fc = (
             detector_fc(
-                w3.view(nc, -1)
+                w3.view(local_nc, -1)
             )
             .cpu()
             .numpy()
@@ -369,7 +384,7 @@ def vqc_feature_extraction(
             "Unexpected conv1 feature shape: {} "
             "(expected ({}, {}))".format(
                 features_conv1.shape,
-                nc,
+                local_nc,
                 expected_conv1_dim,
             )
         )
@@ -383,7 +398,7 @@ def vqc_feature_extraction(
             "Unexpected fc feature shape: {} "
             "(expected ({}, {}))".format(
                 features_fc.shape,
-                nc,
+                local_nc,
                 expected_fc_dim,
             )
         )
@@ -440,49 +455,21 @@ def vqc_feature_extraction(
 
     try:
 
-        # Unsupervised anomaly scoring. No labels, Byzantine identities,
-        # test data, validation data, or fixed anomaly quota are supplied.
         clf = IsolationForest(
-            contamination="auto",
+            contamination=_IFOREST_CONTAMINATION,
             random_state=42,
             n_estimators=_IFOREST_N_ESTIMATORS,
         )
 
-        clf.fit(feature)
-
-        # Larger score = more normal; smaller score = more anomalous.
-        scores = clf.decision_function(feature)
-
-        score_median = float(np.median(scores))
-        score_std = float(np.std(scores))
-
-        # Adaptive population-only threshold.
-        score_threshold = score_median - 1.5 * score_std
+        predictions = clf.fit_predict(
+            feature
+        )
 
         malicious = [
-            c
-            for c in range(nc)
-            if scores[c] < score_threshold
+            original_indices[c]
+            for c in range(local_nc)
+            if predictions[c] == -1
         ]
-
-        predictions = np.ones(nc, dtype=int)
-        for c in malicious:
-            predictions[c] = -1
-
-        print(
-            "  [Isolation Forest] Scores: {}".format(
-                np.round(scores, 4).tolist()
-            )
-        )
-
-        print(
-            "  [Isolation Forest] "
-            "median={:.4f} std={:.4f} threshold={:.4f}".format(
-                score_median,
-                score_std,
-                score_threshold,
-            )
-        )
 
         print(
             "  [Isolation Forest] Predictions: {}".format(
@@ -509,10 +496,15 @@ def vqc_feature_extraction(
 
     # ── Sign-flip detector ────────────────────────────────────────────────────
 
-    flip_detected = detect_sign_flip_attacks(
+    flip_detected_local = detect_sign_flip_attacks(
         Upload_Parameters,
-        nc,
+        local_nc,
     )
+
+    flip_detected = [
+        original_indices[c]
+        for c in flip_detected_local
+    ]
 
     # ── Ensemble ──────────────────────────────────────────────────────────────
 
@@ -1226,13 +1218,37 @@ def run_experiment(
         )
 
         # ── Stage 2: VQC + sign-flip detection ───────────────────────────────
+        #
+        # Sequential pipeline:
+        #   Stage 1 norm filtering
+        #       ↓
+        #   remove rejected updates
+        #       ↓
+        #   VQC + Isolation Forest + sign-flip detection
+        #
+        # The retained list keeps the original client indices so detector
+        # outputs still map correctly to the full client population.
+
+        norm_rejected_set = set(norm_rejected)
+
+        retained_indices = [
+            i
+            for i in range(nc)
+            if i not in norm_rejected_set
+        ]
+
+        retained_updates = [
+            Upload_Parameters[i]
+            for i in retained_indices
+        ]
 
         vqc_detected = vqc_feature_extraction(
-            Upload_Parameters,
+            retained_updates,
             detector_conv1,
             detector_fc,
             cfg,
             dev,
+            original_indices=retained_indices,
         )
 
         # ── Stage 3: Ensemble ─────────────────────────────────────────────────
@@ -1245,7 +1261,7 @@ def run_experiment(
 
         print(
             "  [Ensemble] "
-            "Norm filter={} + VQC={} → Final={}: {}".format(
+            "Norm filter={} + VQC+SignFlip={} → Final={}: {}".format(
                 len(norm_rejected),
                 len(vqc_detected),
                 len(detected),
