@@ -70,9 +70,8 @@ from metrics import (
 
 # ── Detector constants ────────────────────────────────────────────────────────
 
-# Fixed Isolation Forest contamination assumption.
-# IMPORTANT:
-# This is NOT dynamically obtained from ground-truth labels at runtime.
+# Retained for configuration/backward compatibility.
+# The detector no longer uses this as a fixed anomaly quota.
 _IFOREST_CONTAMINATION = 0.25
 
 # Fixed number of Isolation Forest trees.
@@ -441,21 +440,49 @@ def vqc_feature_extraction(
 
     try:
 
+        # Unsupervised anomaly scoring. No labels, Byzantine identities,
+        # test data, validation data, or fixed anomaly quota are supplied.
         clf = IsolationForest(
-            contamination=_IFOREST_CONTAMINATION,
+            contamination="auto",
             random_state=42,
             n_estimators=_IFOREST_N_ESTIMATORS,
         )
 
-        predictions = clf.fit_predict(
-            feature
-        )
+        clf.fit(feature)
+
+        # Larger score = more normal; smaller score = more anomalous.
+        scores = clf.decision_function(feature)
+
+        score_median = float(np.median(scores))
+        score_std = float(np.std(scores))
+
+        # Adaptive population-only threshold.
+        score_threshold = score_median - 1.5 * score_std
 
         malicious = [
             c
             for c in range(nc)
-            if predictions[c] == -1
+            if scores[c] < score_threshold
         ]
+
+        predictions = np.ones(nc, dtype=int)
+        for c in malicious:
+            predictions[c] = -1
+
+        print(
+            "  [Isolation Forest] Scores: {}".format(
+                np.round(scores, 4).tolist()
+            )
+        )
+
+        print(
+            "  [Isolation Forest] "
+            "median={:.4f} std={:.4f} threshold={:.4f}".format(
+                score_median,
+                score_std,
+                score_threshold,
+            )
+        )
 
         print(
             "  [Isolation Forest] Predictions: {}".format(
