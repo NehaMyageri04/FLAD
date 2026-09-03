@@ -32,6 +32,7 @@ This prevents the evaluation set from influencing future FL rounds.
 """
 
 import argparse
+import copy
 import os
 import sys
 import time
@@ -669,57 +670,30 @@ def clip_gradient_norms(
 
 # ── Federated averaging ───────────────────────────────────────────────────────
 
-def fed_avg(
-    Upload_Parameters,
-    malicious,
-):
+def fed_avg(Upload_Parameters, clients_in_avg):
     """
-    Aggregate only updates that were identified by the detector.
-
-    The malicious list comes exclusively from detector outputs.
+    Federated Averaging with BatchNorm integer buffer preservation.
+    Floating-point parameters are averaged normally.
+    Integer buffers (e.g. num_batches_tracked) are taken from the first trusted client.
     """
+    if not clients_in_avg:
+        return None
 
-    params = list(
-        Upload_Parameters
-    )
+    avg_params = copy.deepcopy(Upload_Parameters[clients_in_avg[0]])
 
-    for j, idx in enumerate(
-        sorted(malicious)
-    ):
+    for key in avg_params:
+        # Preserve integer buffers — do not divide
+        if avg_params[key].dtype in (torch.int32, torch.int64, torch.long):
+            # Take from first trusted client as canonical value
+            avg_params[key] = Upload_Parameters[clients_in_avg[0]][key].clone()
+            continue
 
-        del params[
-            idx - j
-        ]
+        # Normal averaging for all floating-point tensors
+        avg_params[key] = torch.stack(
+            [Upload_Parameters[i][key].float() for i in clients_in_avg]
+        ).mean(dim=0).to(Upload_Parameters[clients_in_avg[0]][key].dtype)
 
-    if not params:
-        raise ValueError(
-            "All client updates were rejected."
-        )
-
-    total = len(params)
-
-    agg = None
-
-    for p in params:
-
-        if agg is None:
-
-            agg = {
-                k: v.clone()
-                for k, v in p.items()
-            }
-
-        else:
-
-            for k in p:
-
-                agg[k] += p[k]
-
-    for k in agg:
-
-        agg[k] /= total
-
-    return agg
+    return avg_params
 
 
 # ── Attack construction ───────────────────────────────────────────────────────
@@ -1336,9 +1310,17 @@ def run_experiment(
 
         # ── Stage 5: Federated aggregation ───────────────────────────────────
 
+        clients_in_avg = [
+            i for i in range(len(Upload_Parameters))
+            if i not in detected
+        ]
+
+        if not clients_in_avg:
+            raise ValueError("All client updates were rejected.")
+
         candidate_parameters = fed_avg(
-            list(Upload_Parameters),
-            detected,
+            Upload_Parameters,
+            clients_in_avg,
         )
 
         # ── Stage 6: Server-side structural health / checkpoint recovery ─────
