@@ -22,7 +22,8 @@ def ZeroGradient_attack(honest_weight, byzantine_Size=10):
 def backdoor_poisoning_data(client, data_name):
     if data_name == 'mnist':
         backdoor = torch.ones([6,6])*2.821  #(255/255.0-0.1307)/0.3081
-        
+    elif data_name == 'fashion_mnist':
+        backdoor = torch.ones([6,6]) * ((1.0 - 0.2860) / 0.3530)
     elif data_name == 'cifar_10':
         backdoor = torch.ones([3,6,6])
         backdoor[0] = backdoor[0]*2.514
@@ -33,7 +34,8 @@ def backdoor_poisoning_data(client, data_name):
         if data_name == 'mnist':
             client.local_data[i].view(28,28)[0:6,0:6] = backdoor  
             client.local_data[i] = client.local_data[i].view(784,) 
-            
+        elif data_name == 'fashion_mnist':
+            client.local_data[i].view(1,28,28)[0, 0:6, 0:6] = backdoor
         elif data_name == 'cifar_10':
             for j in range(3):
                 client.local_data[i][j][0:6,0:6] = backdoor[j]
@@ -45,7 +47,8 @@ def backdoor_poisoning_data(client, data_name):
 def model_replacement_attack_data(client, data_name): 
     if data_name == 'mnist':
         backdoor = torch.ones([6,6])*2.821  #(255/255.0-0.1307)/0.3081
-        
+    elif data_name == 'fashion_mnist':
+        backdoor = torch.ones([6,6]) * ((1.0 - 0.2860) / 0.3530)
     elif data_name == 'cifar_10':
         backdoor = torch.ones([3,6,6])
         backdoor[0] = backdoor[0]*2.514
@@ -56,7 +59,8 @@ def model_replacement_attack_data(client, data_name):
         if data_name == 'mnist':
             client.local_data[i].view(28,28)[0:6,0:6] = backdoor  
             client.local_data[i] = client.local_data[i].view(784,) 
-            
+        elif data_name == 'fashion_mnist':
+            client.local_data[i].view(1,28,28)[0, 0:6, 0:6] = backdoor
         elif data_name == 'cifar_10':
             for j in range(3):
                 client.local_data[i][j][0:6,0:6] = backdoor[j]
