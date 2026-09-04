@@ -51,7 +51,12 @@ if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
 
-from Models import Mnist_CNN, ResNet18, QuantumByzantineDetector
+from Models import (
+    Mnist_CNN,
+    FashionMNIST_CNN,
+    ResNet18,
+    QuantumByzantineDetector,
+)
 from clients import ClientsGroup
 import Attack
 
@@ -113,6 +118,20 @@ def feature_extraction_model(Central_par, cfg, dev):
 
         detector_fc = QuantumByzantineDetector(
             dimen=10 * 320,
+            num_qubits=8,
+            num_layers=5,
+        )
+
+    elif cfg["data_name"] == "fashion_mnist":
+
+        detector_conv1 = QuantumByzantineDetector(
+            dimen=32 * 1 * 3 * 3,
+            num_qubits=8,
+            num_layers=5,
+        )
+
+        detector_fc = QuantumByzantineDetector(
+            dimen=10 * 128,
             num_qubits=8,
             num_layers=5,
         )
@@ -300,6 +319,22 @@ def vqc_feature_extraction(
             320,
         ).to(dev)
 
+    elif cfg["data_name"] == "fashion_mnist":
+
+        k1 = torch.zeros(
+            nc,
+            32,
+            1,
+            3,
+            3,
+        ).to(dev)
+
+        w3 = torch.zeros(
+            nc,
+            10,
+            128,
+        ).to(dev)
+
     else:
 
         k1 = torch.zeros(
@@ -319,6 +354,11 @@ def vqc_feature_extraction(
     for i, W in enumerate(Upload_Parameters):
 
         if cfg["data_name"] == "mnist":
+
+            k1[i] = W["conv1.weight"].data
+            w3[i] = W["fc.weight"].data
+
+        elif cfg["data_name"] == "fashion_mnist":
 
             k1[i] = W["conv1.weight"].data
             w3[i] = W["fc.weight"].data
@@ -1007,7 +1047,11 @@ def run_experiment(
 
         net = Mnist_CNN()
 
-    else:
+    elif cfg["data_name"] == "fashion_mnist":
+
+        net = FashionMNIST_CNN()
+
+    elif cfg["data_name"] == "cifar_10":
 
         net = ResNet18()
 
@@ -1651,6 +1695,7 @@ def main():
         default="mnist",
         choices=[
             "mnist",
+            "fashion_mnist",
             "cifar_10",
         ],
     )
