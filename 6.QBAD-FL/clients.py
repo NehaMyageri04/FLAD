@@ -89,6 +89,10 @@ class ClientsGroup(object):
             self.test_label = torch.tensor(DataSet.test_label)
             self.test_label = torch.argmax(torch.tensor(DataSet.test_label), dim=1)
 
+        elif self.data_set_name == 'fashion_mnist':
+            self.test_data = DataSet.test_data
+            self.test_label = DataSet.test_label
+
         elif self.data_set_name == 'cifar_10':
             self.test_data = DataSet.test_data
             self.test_label = DataSet.test_label
@@ -103,6 +107,8 @@ class ClientsGroup(object):
             if self.data_set_name == 'mnist':
                 local_label = np.argmax(local_label, axis=1)
                 one = client(torch.tensor(local_data), torch.tensor(local_label), self.dev)
+            elif self.data_set_name == 'fashion_mnist':
+                one = client(local_data, local_label, self.dev)
             elif self.data_set_name == 'cifar_10':
                 one = client(local_data, local_label, self.dev)
             self.clients_set['client{}'.format(i)] = one
@@ -116,6 +122,11 @@ class ClientsGroup(object):
             self.test_label = torch.tensor(DataSet.test_label)
             self.test_label = torch.argmax(torch.tensor(DataSet.test_label), dim=1)
             samples, non_iid, datasize  = 6000, 0.8, 60000
+
+        elif self.data_set_name == 'fashion_mnist':
+            self.test_data = DataSet.test_data
+            self.test_label = DataSet.test_label
+            samples, non_iid, datasize = 6000, 0.8, 60000
 
         elif self.data_set_name == 'cifar_10':
             self.test_data = DataSet.test_data
@@ -159,6 +170,7 @@ class ClientsGroup(object):
             local_label = np.concatenate((class_label[group][temp*mod : mod*temp + temp], random_label[temp1*i : temp1*i + temp1]),axis=0)
             if self.data_set_name == 'mnist':
                 local_label = np.argmax(local_label, axis=1)
-            one = client(torch.tensor(local_data), torch.tensor(local_label), self.dev)
+                one = client(torch.tensor(local_data), torch.tensor(local_label), self.dev)
+            else:
+                one = client(torch.as_tensor(local_data), torch.as_tensor(local_label), self.dev)
             self.clients_set['client{}'.format(i)] = one
-
