@@ -1,6 +1,7 @@
 import numpy as np
 import gzip
 import os
+import torch
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
@@ -35,8 +36,10 @@ class GetDataSet(object):
 
         if self.name == 'mnist':
             self.mnistDataSetConstruct(isIID)
-        elif self.name =='cifar_10':
+        elif self.name == 'cifar_10':
             self.cifarDataSetConstruct(isIID)
+        elif self.name == 'fashion_mnist':
+            self.fashionMnistDataSetConstruct(isIID)
             
             
     def cifarDataSetConstruct(self,isIID):
@@ -81,6 +84,65 @@ class GetDataSet(object):
         self.test_data = test_images[order]
         self.test_label = test_labels[order]
         
+
+    def fashionMnistDataSetConstruct(self, isIID):
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.2860,), (0.3530,))
+        ])
+
+        train_data = torchvision.datasets.FashionMNIST(
+            "../data/Fashion_MNIST",
+            train=True,
+            transform=transform,
+            download=True
+        )
+
+        test_data = torchvision.datasets.FashionMNIST(
+            "../data/Fashion_MNIST",
+            train=False,
+            transform=transform,
+            download=True
+        )
+
+        self.train_data_size = len(train_data)
+        self.test_data_size = len(test_data)
+
+        train_dataloader = DataLoader(
+            dataset=train_data,
+            batch_size=self.train_data_size
+        )
+
+        test_dataloader = DataLoader(
+            dataset=test_data,
+            batch_size=self.test_data_size
+        )
+
+        for data in train_dataloader:
+            train_images, train_labels = data
+
+        for data in test_dataloader:
+            test_images, test_labels = data
+
+        if isIID:
+            order = np.arange(self.train_data_size)
+            np.random.shuffle(order)
+
+            self.train_data = train_images[order]
+            self.train_label = train_labels[order]
+
+        else:
+            order = torch.argsort(train_labels)
+
+            self.train_data = train_images[order]
+            self.train_label = train_labels[order]
+
+        order = np.arange(self.test_data_size)
+        np.random.shuffle(order)
+
+        self.test_data = test_images[order]
+        self.test_label = test_labels[order]
+
 
     def mnistDataSetConstruct(self, isIID):
         data_dir = r'../data/MNIST'
@@ -185,8 +247,3 @@ if __name__=="__main__":
     print('the shape of the train data set is {}'.format(mnistDataSet.train_data.shape))
     print('the shape of the test data set is {}'.format(mnistDataSet.test_data.shape))
     print(mnistDataSet.train_label[0:100], mnistDataSet.train_label[11000:11100])
-    
-    
-    
-    
-
