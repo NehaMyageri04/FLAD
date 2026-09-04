@@ -24,6 +24,32 @@ class Mnist_CNN(nn.Module):
         return self.fc(tensor)
 
 
+class FashionMNIST_CNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+
+        self.pooling = nn.MaxPool2d(2)
+
+        self.fc_hidden = nn.Linear(128 * 3 * 3, 128)
+        self.fc = nn.Linear(128, 10)
+
+    def forward(self, inputs):
+        x = inputs.view(-1, 1, 28, 28)
+
+        x = self.pooling(F.relu(self.conv1(x)))   # 28 -> 14
+        x = self.pooling(F.relu(self.conv2(x)))   # 14 -> 7
+        x = self.pooling(F.relu(self.conv3(x)))   # 7 -> 3
+
+        x = x.view(x.size(0), -1)
+
+        x = F.relu(self.fc_hidden(x))
+        return self.fc(x)
+
+
 class BasicBlock(nn.Module):
     def __init__(self, in_features, out_features) -> None:
         super().__init__()
